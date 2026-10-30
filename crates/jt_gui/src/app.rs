@@ -69,8 +69,16 @@ pub enum Action {
     ShowInTreemap(NodeId),
     OpenExplorer(NodeId),
     CopyPath(NodeId),
-    AskDelete { id: NodeId, permanent: bool },
-    ConfirmDelete { ids: Vec<NodeId>, permanent: bool },
+    AskDelete {
+        id: NodeId,
+        permanent: bool,
+    },
+    ConfirmDelete {
+        ids: Vec<NodeId>,
+        paths: Vec<String>,
+        tree_gen: u64,
+        permanent: bool,
+    },
     OpenExport,
     RunExport(ExportDialog),
     StartScan,
@@ -242,6 +250,9 @@ impl AppState {
         self.tree = Some(Arc::new(tree));
         self.tree_is_live = live;
         self.tree_gen += 1;
+        // Offene Dialoge beziehen sich auf Knoten des alten Baums.
+        self.dialogs.delete = None;
+        self.dialogs.export = None;
         self.selected = None;
         self.tree_view = Default::default();
         self.treemap = Default::default();
@@ -548,17 +559,33 @@ impl JtApp {
                 }
             }
             Action::AskDelete { id, permanent } => {
-                if self.state.deletion_allowed() && !self.state.delete_running {
-                    self.state.dialogs.delete = Some(dialogs::DeleteDialog::new(id, permanent));
+                if let Some(t) = &tree
+                    && (id as usize) < t.nodes.len()
+                    && self.state.deletion_allowed()
+                    && !self.state.delete_running
+                {
+                    self.state.dialogs.delete = Some(dialogs::DeleteDialog::new(
+                        t,
+                        id,
+                        permanent,
+                        self.state.tree_gen,
+                    ));
                 } else if !can_delete() {
                     self.state.status = tr(lang, Key::DelAdminOnly).to_string();
                 }
             }
-            Action::ConfirmDelete { ids, permanent } => {
-                if let Some(t) = tree
+            Action::ConfirmDelete {
+                ids,
+                paths,
+                tree_gen,
+                permanent,
+            } => {
+                if !dialogs::delete_gen_ok(tree_gen, self.state.tree_gen) {
+                    self.state.status = tr(lang, Key::DelTreeChanged).to_string();
+                } else if let Some(t) = tree
                     && self.state.deletion_allowed()
                 {
-                    self.start_delete(ctx, t, ids, permanent);
+                    self.start_delete(ctx, t, ids, paths, permanent);
                 }
             }
             Action::OpenExport => {
@@ -783,9 +810,17 @@ impl JtApp {
         ctx: &egui::Context,
         tree: Arc<Tree>,
         ids: Vec<NodeId>,
+        paths: Vec<String>,
         permanent: bool,
     ) {
-        let ids: Vec<NodeId> = ids.into_iter().filter(|&id| id != tree.root()).collect();
+        // Gelöscht werden die beim Öffnen des Dialogs gemerkten Pfade, nie neu aus
+        // Knoten-Nummern ermittelte. Die Wurzel bleibt ausgeschlossen.
+        let root = tree.root();
+        let (ids, paths): (Vec<NodeId>, Vec<String>) = ids
+            .into_iter()
+            .zip(paths)
+            .filter(|&(id, _)| id != root)
+            .unzip();
         if ids.is_empty() || self.state.delete_running {
             return;
         }
@@ -793,7 +828,6 @@ impl JtApp {
         let gen_ = self.state.tree_gen;
         let lang = self.state.lang();
         self.spawn(ctx, JobKind::Delete, move |_| {
-            let paths: Vec<String> = ids.iter().map(|&id| tree.full_path(id)).collect();
             let res = if permanent {
                 jt_core::platform::delete_permanently(&paths)
             } else {

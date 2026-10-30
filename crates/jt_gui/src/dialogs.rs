@@ -4,7 +4,7 @@
 use eframe::egui::{self, Context, Id, Modal};
 use jt_core::export::ExportFormat;
 use jt_core::format::bytes;
-use jt_core::{Key, Lang, NodeId, tr};
+use jt_core::{Key, Lang, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, fill};
 
@@ -16,9 +16,19 @@ pub struct Dialogs {
 }
 
 /// Zweistufige Lösch-Bestätigung.
+///
+/// Merkt sich beim Öffnen die vollen Pfade und die Baum-Generation: Knoten-Nummern
+/// gelten nur für genau einen Baum und könnten nach einem neuen Scan auf einen
+/// anderen Pfad zeigen.
 #[derive(Clone, Debug)]
 pub struct DeleteDialog {
-    pub id: NodeId,
+    pub ids: Vec<NodeId>,
+    pub paths: Vec<String>,
+    /// `AppState::tree_gen` beim Öffnen.
+    pub tree_gen: u64,
+    /// Anzahl Einträge (inkl. Unterordner/Dateien) und Größe beim Öffnen.
+    pub count: u64,
+    pub size: u64,
     pub permanent: bool,
     /// 1 = erste Rückfrage, 2 = Tippwort (nur endgültig).
     pub step: u8,
@@ -26,14 +36,30 @@ pub struct DeleteDialog {
 }
 
 impl DeleteDialog {
-    pub fn new(id: NodeId, permanent: bool) -> Self {
+    pub fn new(tree: &Tree, id: NodeId, permanent: bool, tree_gen: u64) -> Self {
+        let n = tree.node(id);
+        let count = if n.is_dir() {
+            1 + u64::from(n.file_count) + u64::from(n.dir_count)
+        } else {
+            1
+        };
         DeleteDialog {
-            id,
+            ids: vec![id],
+            paths: vec![tree.full_path(id)],
+            tree_gen,
+            count,
+            size: n.size,
             permanent,
             step: 1,
             typed: String::new(),
         }
     }
+}
+
+/// Darf eine Lösch-Bestätigung ausgeführt werden? Nur wenn der Baum seit dem Öffnen
+/// des Dialogs nicht ersetzt oder verändert wurde.
+pub fn delete_gen_ok(dialog_gen: u64, current_gen: u64) -> bool {
+    dialog_gen == current_gen
 }
 
 /// Prüft das Tippwort (exakt, nach Trimmen).
@@ -112,24 +138,24 @@ pub fn show(ctx: &Context, state: &mut AppState) {
 fn delete_dialog(ctx: &Context, state: &mut AppState) {
     let lang = state.lang();
     let allowed = state.deletion_allowed();
+    let current_gen = state.tree_gen;
     let Some(dlg) = state.dialogs.delete.as_mut() else {
         return;
     };
     // Doppelte Absicherung: ohne Admin-Rechte oder bei geladenem Snapshot nie anzeigen.
-    let tree = match (&state.tree, allowed) {
-        (Some(t), true) if (dlg.id as usize) < t.nodes.len() => t.clone(),
-        _ => {
-            state.dialogs.delete = None;
-            return;
-        }
-    };
-    let n = tree.node(dlg.id);
-    let path = tree.full_path(dlg.id);
-    let count = if n.is_dir() {
-        1 + u64::from(n.file_count) + u64::from(n.dir_count)
-    } else {
-        1
-    };
+    if !allowed || state.tree.is_none() {
+        state.dialogs.delete = None;
+        return;
+    }
+    // Baum hat sich seit dem Öffnen geändert: schließen, nichts löschen.
+    if !delete_gen_ok(dlg.tree_gen, current_gen) {
+        state.dialogs.delete = None;
+        state.status = tr(lang, Key::DelTreeChanged).to_string();
+        return;
+    }
+    let path = dlg.paths.join("\n");
+    let count = dlg.count;
+    let size = dlg.size;
     let mut close = false;
     let mut confirm = false;
     let resp = Modal::new(Id::unique("jt_delete_modal")).show(ctx, |ui| {
@@ -153,7 +179,7 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
             ui.monospace(&path);
             ui.label(fill(
                 tr(lang, Key::DelStep1Count),
-                &[("{n}", &count_s), ("{size}", &bytes(n.size, lang))],
+                &[("{n}", &count_s), ("{size}", &bytes(size, lang))],
             ));
             ui.horizontal(|ui| {
                 if ui.button(tr(lang, Key::DelContinue)).clicked() {
@@ -190,7 +216,9 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
     }
     if confirm {
         state.actions.push(Action::ConfirmDelete {
-            ids: vec![dlg.id],
+            ids: dlg.ids.clone(),
+            paths: dlg.paths.clone(),
+            tree_gen: dlg.tree_gen,
             permanent: dlg.permanent,
         });
         close = true;
@@ -330,9 +358,9 @@ mod tests {
     }
 
     #[test]
-    fn delete_dialog_starts_at_step_one() {
-        let d = DeleteDialog::new(5, true);
-        assert_eq!(d.step, 1);
-        assert!(d.typed.is_empty());
+    fn delete_only_with_unchanged_tree_gen() {
+        assert!(delete_gen_ok(7, 7));
+        assert!(!delete_gen_ok(7, 8));
+        assert!(!delete_gen_ok(8, 7));
     }
 }

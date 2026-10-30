@@ -374,6 +374,7 @@ keys! {
     CtxShowInTree => ("Im Baum zeigen", "Show in tree"),
     CtxShowInTreemap => ("In Treemap zeigen", "Show in treemap"),
     UnitMibSuffix => (" MiB", " MiB"),
+    DelTreeChanged => ("Der Baum hat sich geändert – Löschen abgebrochen, nichts wurde gelöscht.", "The tree has changed – deletion cancelled, nothing was deleted."),
 }
 
 /// Für den Vollständigkeitstest.

@@ -29,7 +29,7 @@ Ein Cargo-Workspace mit **zwei Crates**. So bleibt die Kernlogik frei von GUI- u
 ```
 joschys_tree/
 ├─ Cargo.toml                 Workspace (members = crates/*), [profile.release] opt-level=3, lto="fat", codegen-units=1, strip=true, panic="abort"
-├─ rust-toolchain.toml        channel = "stable" (Mindestversion 1.95, kommt von egui 0.37)
+├─ rust-toolchain.toml        channel = "1.99.1" (fest; Mindestversion 1.95, kommt von egui 0.37)
 ├─ README.md  LICENSE (AGPL-3.0, Volltext)  BUILD.md
 ├─ .github/workflows/build.yml
 ├─ crates/
