@@ -367,6 +367,12 @@ keys! {
     ErrUnsupported => ("Auf diesem System nicht unterstützt.", "Not supported on this system."),
     ErrElevate => ("Neustart als Administrator fehlgeschlagen: {err}", "Restart as administrator failed: {err}"),
     ErrGeneric => ("Unerwarteter Fehler: {err}", "Unexpected error: {err}"),
+
+    // ---- GUI-Ergänzungen (Auftrag E) ----
+    AgeDays => ("{n} Tage", "{n} days"),
+    CtxShowInTree => ("Im Baum zeigen", "Show in tree"),
+    CtxShowInTreemap => ("In Treemap zeigen", "Show in treemap"),
+    UnitMibSuffix => (" MiB", " MiB"),
 }
 
 /// Für den Vollständigkeitstest.

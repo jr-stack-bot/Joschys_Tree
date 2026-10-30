@@ -1,6 +1,7 @@
 // Joschys_Tree – Programmstart (eframe), Fenstertitel Joschys_Tree @ Joschy – @ Joschy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Kein Konsolenfenster unter Windows (auf anderen Plattformen wirkungslos).
 #![windows_subsystem = "windows"]
 
 mod app;
@@ -10,7 +11,7 @@ mod settings;
 mod theme;
 mod views;
 
-/// Fenstertitel; Auftrag E ergänzt " – <Ziel>".
+/// Fenstertitel; zur Laufzeit wird " – <Ziel>" angehängt.
 pub const WINDOW_TITLE: &str = "Joschys_Tree @ Joschy";
 
 fn main() -> eframe::Result {

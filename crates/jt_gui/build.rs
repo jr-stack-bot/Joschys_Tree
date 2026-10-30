@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 fn main() {
+    // embed-manifest ist nur auf Windows-Hosts als Build-Abhängigkeit vorhanden;
+    // zusätzlich muss das Ziel Windows sein.
     #[cfg(windows)]
     {
         use embed_manifest::manifest::{DpiAwareness, ExecutionLevel, Setting};
