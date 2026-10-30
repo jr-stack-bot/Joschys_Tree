@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use jt_core::model::{NodeFlags, ScanMode};
+use jt_core::model::ScanMode;
 use jt_core::scan::{ScanError, ScanRequest, scan};
 
 fn req(root: &Path) -> ScanRequest {
@@ -85,7 +85,7 @@ fn scan_walk_sizes_counts_and_symlink_not_followed() {
             .find_path(&format!("{root_s}/link_auf_a"))
             .expect("Symlink als Eintrag vorhanden");
         let ln = t.node(l);
-        assert!(ln.flags.contains(NodeFlags::REPARSE));
+        assert!(ln.flags.contains(jt_core::model::NodeFlags::REPARSE));
         assert_eq!(t.children(l).count(), 0, "Symlink wird nicht verfolgt");
         assert_eq!(ln.size, 0);
         // a, b, c + Link (als Ordner-Link angezeigt)
@@ -115,7 +115,7 @@ fn scan_walk_unreadable_dir_counts_error_and_marks_access_denied() {
             assert_eq!(t.meta.errors, 0);
         } else {
             assert!(t.meta.errors >= 1);
-            assert!(t.node(id).flags.contains(NodeFlags::ACCESS_DENIED));
+            assert!(t.node(id).flags.contains(jt_core::model::NodeFlags::ACCESS_DENIED));
             assert_eq!(t.node(0).size, 5);
         }
     }
