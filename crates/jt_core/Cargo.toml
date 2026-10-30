@@ -1,0 +1,38 @@
+# Joschys_Tree – Kernbibliothek jt_core – @ Joschy
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "jt_core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Joschys_Tree Kernlogik (ohne GUI) – @ Joschy"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["use-std"] }
+lz4_flex = "0.14"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rayon = "1.12"
+bitflags = { version = "2", features = ["serde"] }
+globset = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+rust_xlsxwriter = { version = "0.102", default-features = false }
+pdf-writer = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    "Win32_UI_Shell",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"

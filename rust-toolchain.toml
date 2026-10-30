@@ -1,0 +1,4 @@
+# Joschys_Tree – Rust-Toolchain – @ Joschy
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

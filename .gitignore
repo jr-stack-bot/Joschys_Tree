@@ -1,0 +1,9 @@
+# Joschys_Tree – @ Joschy
+target/
+*.jtscan
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+.DS_Store
