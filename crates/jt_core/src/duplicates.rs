@@ -14,9 +14,9 @@ use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
-use xxhash_rust::xxh3::{xxh3_128, Xxh3};
+use xxhash_rust::xxh3::{Xxh3, xxh3_128};
 
-use crate::model::{NodeFlags, NodeId, Tree, NO_NODE};
+use crate::model::{NO_NODE, NodeFlags, NodeId, Tree};
 
 /// Größe des Teil-Hashes (Stufe 2).
 pub const HEAD_SIZE: usize = 4096;

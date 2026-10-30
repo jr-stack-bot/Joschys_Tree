@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{NodeId, Tree, NO_NODE};
+use crate::model::{NO_NODE, NodeId, Tree};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeKind {

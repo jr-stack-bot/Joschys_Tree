@@ -19,6 +19,6 @@ pub mod stats;
 
 pub use i18n::{Key, Lang, tr};
 pub use model::{
-    BRANDING, ChildIter, EntryInfo, FileTime, NO_NODE, Node, NodeFlags, NodeId, ScanMeta,
-    ScanMode, Tree, TreeBuilder,
+    BRANDING, ChildIter, EntryInfo, FileTime, NO_NODE, Node, NodeFlags, NodeId, ScanMeta, ScanMode,
+    Tree, TreeBuilder,
 };

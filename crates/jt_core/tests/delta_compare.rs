@@ -1,7 +1,7 @@
 // Joschys_Tree – Tests Delta-Vergleich und Verlauf – @ Joschy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use jt_core::delta::{compare, ChangeKind};
+use jt_core::delta::{ChangeKind, compare};
 use jt_core::history::{series_for_path, top_growers};
 use jt_core::model::testutil::sample_tree;
 use jt_core::{EntryInfo, FileTime, ScanMeta, ScanMode, Tree, TreeBuilder};

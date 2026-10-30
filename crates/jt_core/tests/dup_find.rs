@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use jt_core::duplicates::{find_duplicates, DupGroup, FileReader, StdFileReader};
+use jt_core::duplicates::{DupGroup, FileReader, StdFileReader, find_duplicates};
 use jt_core::{EntryInfo, NodeId, ScanMeta, ScanMode, Tree, TreeBuilder};
 
 fn no_progress(_: u64, _: u64) {}
