@@ -99,3 +99,16 @@ fn scan_non_windows_stubs() {
     assert!(volume_info("/").is_err());
     assert!(delete_permanently(&["x".into()]).is_err());
 }
+
+#[test]
+fn recycle_bin_only_on_fixed_drives() {
+    use jt_core::platform::{drive_type_has_recycle_bin, no_recycle_bin_error};
+    // 3 = DRIVE_FIXED
+    assert!(drive_type_has_recycle_bin(3));
+    // 0 unbekannt, 1 kein Root, 2 Wechseldatenträger (USB), 4 Netz, 5 CD, 6 RAM-Disk
+    for t in [0, 1, 2, 4, 5, 6] {
+        assert!(!drive_type_has_recycle_bin(t), "Typ {t}");
+    }
+    let e = no_recycle_bin_error(r"\\server\share\a.txt");
+    assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
+}

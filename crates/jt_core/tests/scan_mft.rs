@@ -111,11 +111,24 @@ impl RecBuilder {
     }
 
     fn file_name(&mut self, parent: u64, seq: u16, name: &str, namespace: u8) -> &mut Self {
+        self.file_name_tag(parent, seq, name, namespace, 0)
+    }
+
+    /// $FILE_NAME mit Reparse-Tag im Feld 0x3C.
+    fn file_name_tag(
+        &mut self,
+        parent: u64,
+        seq: u16,
+        name: &str,
+        namespace: u8,
+        reparse: u32,
+    ) -> &mut Self {
         let n = utf16(name);
         let mut v = vec![0u8; 66 + n.len()];
         let parent_ref = parent | ((seq as u64) << 48);
         v[0..8].copy_from_slice(&parent_ref.to_le_bytes());
         v[8..16].copy_from_slice(&ft(1).to_le_bytes());
+        v[60..64].copy_from_slice(&reparse.to_le_bytes());
         v[64] = (n.len() / 2) as u8;
         v[65] = namespace;
         v[66..].copy_from_slice(&n);
@@ -232,6 +245,38 @@ fn scan_fixup_detects_torn_write() {
     assert_eq!(apply_fixup(&mut buf, SECTOR), Err(MftError::FixupMismatch));
     let mut short = vec![0u8; 4];
     assert_eq!(apply_fixup(&mut short, SECTOR), Err(MftError::TooShort));
+}
+
+#[test]
+fn scan_fixup_stride_is_always_512() {
+    // 4K-Native-Platte: Sektorgröße 4096, Fixup trotzdem alle 512 Byte.
+    let mut a = file_record_with_ads();
+    let mut b = a.clone();
+    apply_fixup(&mut a, SECTOR).expect("Fixup 512");
+    apply_fixup(&mut b, 4096).expect("Fixup bei 4096-Byte-Sektoren");
+    assert_eq!(a, b);
+    let r = parse_record(&b, 42).unwrap().unwrap();
+    assert_eq!(r.name, "Bericht.txt");
+}
+
+#[test]
+fn scan_nonresident_reparse_uses_file_name_tag() {
+    // 0x400 = FILE_ATTRIBUTE_REPARSE_POINT; $REPARSE_POINT (0xC0) nicht resident.
+    let build = |tag: u32| {
+        let mut b = RecBuilder::new(false);
+        b.std_info(1, 1, 1, 0x400)
+            .file_name_tag(5, 1, "x.dat", 1, tag)
+            .non_resident(0xC0, "", 0, 4096, 2000, &[0x11, 0x01, 0x10, 0x00]);
+        let mut r = b.build(60);
+        apply_fixup(&mut r, SECTOR).unwrap();
+        parse_record(&r, 60).unwrap().unwrap()
+    };
+    // Cloud-Platzhalter (kein Name-Surrogate): normale Datei, kein REPARSE.
+    assert!(!build(0x9000_601A).flags.contains(NodeFlags::REPARSE));
+    // Symlink (Name-Surrogate): bleibt REPARSE.
+    assert!(build(0xA000_000C).flags.contains(NodeFlags::REPARSE));
+    // Tag unbekannt: vorsichtshalber REPARSE.
+    assert!(build(0).flags.contains(NodeFlags::REPARSE));
 }
 
 #[test]

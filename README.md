@@ -28,6 +28,12 @@ Schneller, portabler Festplatten-Analyzer für Windows (Vorbilder: WizTree und T
 - **Mit Administratorrechten:** MFT-Schnellscan auf lokalen NTFS-Laufwerken und Löschen (Papierkorb oder endgültig, mit zweistufiger Bestätigung).
 - **Ohne Administratorrechte:** Nur-Lese-Modus mit Verzeichnis-Scan, keine Lösch-Menüpunkte. Die Fußzeile zeigt den Modus an.
 - Netzfreigaben, FAT32/exFAT und Fehlerfälle fallen automatisch auf den Verzeichnis-Scan zurück.
+- Gelöscht werden kann nur in einem frischen Scan dieses Rechners, nie in einem geladenen Snapshot (`.jtscan`).
+- "In den Papierkorb" löscht nie endgültig: Laufwerke ohne Papierkorb (Netzfreigaben, USB-Sticks) melden einen Hinweis, dann bleibt nur "Endgültig löschen" mit zweiter Bestätigung.
+
+## Bekannte Einschränkungen
+
+- Hardlinks: Der Verzeichnis-Scan (Walk) zählt eine Datei mit mehreren Hardlinks mehrfach, der MFT-Scan nur einmal (erster Name). Die Summen beider Scan-Arten können daher abweichen.
 
 ## Download
 

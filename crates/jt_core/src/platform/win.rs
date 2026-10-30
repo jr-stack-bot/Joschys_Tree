@@ -22,13 +22,13 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetCompressedFileSizeW,
-    GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetLogicalDrives, GetVolumeInformationW,
+    GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
     GetVolumePathNameW, INVALID_FILE_SIZE, WIN32_FIND_STREAM_DATA,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{
-    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
-    SHFileOperationW,
+    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+    SHFILEOPSTRUCTW, SHFileOperationW,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -116,7 +116,10 @@ fn shell_delete(paths: &[String], recycle: bool) -> io::Result<()> {
     let from = multi_sz(paths);
     let mut flags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
     if recycle {
-        flags |= FOF_ALLOWUNDO;
+        // FOF_WANTNUKEWARNING hebelt FOF_NOCONFIRMATION aus, falls die Shell doch
+        // endgültig löschen würde (Papierkorb voll/aus, Datei zu groß): Rückfrage statt
+        // stillem Löschen; "Nein" bricht ab.
+        flags |= FOF_ALLOWUNDO | FOF_WANTNUKEWARNING;
     }
     let mut op = SHFILEOPSTRUCTW {
         hwnd: HWND::default(),
@@ -137,7 +140,18 @@ fn shell_delete(paths: &[String], recycle: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Verschiebt in den Papierkorb und löscht NIE endgültig: Liegt ein Pfad auf einem
+/// Laufwerk ohne Papierkorb (Netzfreigabe, USB-Stick …), wird vorher mit
+/// `ErrorKind::Unsupported` abgebrochen, ohne irgendetwas zu löschen.
 pub fn move_to_recycle_bin(paths: &[String]) -> io::Result<()> {
+    for p in paths {
+        let root = wide(&volume_root(p));
+        // SAFETY: root ist nullterminiertes UTF-16 und lebt bis nach dem Aufruf.
+        let drive_type = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
+        if !super::drive_type_has_recycle_bin(drive_type) {
+            return Err(super::no_recycle_bin_error(p));
+        }
+    }
     shell_delete(paths, true)
 }
 

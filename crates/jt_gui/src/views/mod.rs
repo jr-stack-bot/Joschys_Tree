@@ -4,7 +4,7 @@
 use eframe::egui::{self, Align2, FontId, Sense, Ui, vec2};
 use jt_core::{FileTime, Key, Lang, NO_NODE, Node, NodeId, Tree, tr};
 
-use crate::app::{Action, AppState, Tab, can_delete};
+use crate::app::{Action, AppState, Tab};
 use crate::theme;
 
 pub mod delta;
@@ -138,7 +138,8 @@ pub fn percent_bar(ui: &mut Ui, frac: f32, lang: Lang) {
     );
 }
 
-/// Rechtsklick-Menü für einen Knoten. Löschpunkte nur, wenn `can_delete()`.
+/// Rechtsklick-Menü für einen Knoten. Löschpunkte nur, wenn `allow_delete`
+/// (= `AppState::deletion_allowed()`: Admin und Live-Scan, kein Snapshot).
 pub fn node_menu(
     ui: &mut Ui,
     lang: Lang,
@@ -146,6 +147,7 @@ pub fn node_menu(
     id: NodeId,
     actions: &mut Vec<Action>,
     with_reveal: bool,
+    allow_delete: bool,
 ) {
     if ui.button(tr(lang, Key::CtxOpenExplorer)).clicked() {
         actions.push(Action::OpenExplorer(id));
@@ -159,7 +161,7 @@ pub fn node_menu(
         actions.push(Action::Reveal(id));
         ui.close();
     }
-    if can_delete() && id != tree.root() {
+    if allow_delete && id != tree.root() {
         ui.separator();
         if ui.button(tr(lang, Key::CtxRecycle)).clicked() {
             actions.push(Action::AskDelete {
@@ -185,6 +187,7 @@ pub fn row_interaction(
     tree: &Tree,
     id: NodeId,
     actions: &mut Vec<Action>,
+    allow_delete: bool,
 ) {
     if resp.clicked() {
         actions.push(Action::Select(id));
@@ -192,7 +195,7 @@ pub fn row_interaction(
     if resp.double_clicked() {
         actions.push(Action::Reveal(id));
     }
-    resp.context_menu(|ui| node_menu(ui, lang, tree, id, actions, true));
+    resp.context_menu(|ui| node_menu(ui, lang, tree, id, actions, true, allow_delete));
 }
 
 #[cfg(test)]

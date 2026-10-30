@@ -17,17 +17,33 @@ jobs:
   linux-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --all --check
+      - name: Toolchain-Version
+        shell: bash
+        run: echo "::notice title=toolchain (linux)::$(rustc -V) / $(cargo clippy -V)"
+      # Fehlerzeilen zusätzlich als Annotation ausgeben (lesbar ohne Log-Zugriff).
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        shell: bash
+        run: |
+          if ! cargo clippy --workspace --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.log; then
+            msg=$(grep -E 'error|warning' clippy.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=clippy (linux)::${msg}"
+            exit 1
+          fi
       - name: Tests
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          if ! cargo test --workspace 2>&1 | tee test.log; then
+            msg=$(grep -E 'panicked|FAILED|failed|error' test.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=tests (linux)::${msg}"
+            exit 1
+          fi
 
   windows-build:
     runs-on: windows-latest
@@ -36,14 +52,32 @@ jobs:
     env:
       RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Toolchain-Version
+        shell: bash
+        run: echo "::notice title=toolchain (windows)::$(rustc -V) / $(cargo clippy -V)"
+      # Fehlerzeilen zusätzlich als Annotation ausgeben (lesbar ohne Log-Zugriff).
       - name: Clippy
-        run: cargo clippy --workspace --target x86_64-pc-windows-msvc -- -D warnings
+        shell: bash
+        run: |
+          if ! cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc --message-format=short -- -D warnings 2>&1 | tee clippy.log; then
+            msg=$(grep -E 'error|warning' clippy.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=clippy (windows)::${msg}"
+            exit 1
+          fi
+      - name: Tests jt_core
+        shell: bash
+        run: |
+          if ! cargo test -p jt_core --target x86_64-pc-windows-msvc 2>&1 | tee test.log; then
+            msg=$(grep -E 'panicked|FAILED|failed|error' test.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=tests (windows)::${msg}"
+            exit 1
+          fi
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc -p jt_gui
       - name: Copy exe
@@ -52,7 +86,7 @@ jobs:
           mkdir -p target/release
           cp target/x86_64-pc-windows-msvc/release/JoschysTree.exe target/release/JoschysTree.exe
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: JoschysTree-windows-x64
           path: target/release/JoschysTree.exe

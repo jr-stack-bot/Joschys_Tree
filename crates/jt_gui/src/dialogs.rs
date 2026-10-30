@@ -6,7 +6,7 @@ use jt_core::export::ExportFormat;
 use jt_core::format::bytes;
 use jt_core::{Key, Lang, NodeId, tr};
 
-use crate::app::{Action, AppState, can_delete, fill};
+use crate::app::{Action, AppState, fill};
 
 #[derive(Default)]
 pub struct Dialogs {
@@ -111,11 +111,12 @@ pub fn show(ctx: &Context, state: &mut AppState) {
 
 fn delete_dialog(ctx: &Context, state: &mut AppState) {
     let lang = state.lang();
+    let allowed = state.deletion_allowed();
     let Some(dlg) = state.dialogs.delete.as_mut() else {
         return;
     };
-    // Doppelte Absicherung: ohne Admin-Rechte nie anzeigen.
-    let tree = match (&state.tree, can_delete()) {
+    // Doppelte Absicherung: ohne Admin-Rechte oder bei geladenem Snapshot nie anzeigen.
+    let tree = match (&state.tree, allowed) {
         (Some(t), true) if (dlg.id as usize) < t.nodes.len() => t.clone(),
         _ => {
             state.dialogs.delete = None;

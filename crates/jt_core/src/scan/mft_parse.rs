@@ -149,10 +149,17 @@ pub fn flags_from_win_attributes(attr: u32) -> NodeFlags {
 // Fixup
 // ---------------------------------------------------------------------------
 
-/// Wendet das Update Sequence Array an: prüft das Sektorende jedes Sektors gegen
+/// NTFS-Fixup arbeitet immer in 512-Byte-Schritten, unabhängig von der Sektorgröße
+/// des Datenträgers (auch bei 4K-Native-Platten).
+const FIXUP_STRIDE: usize = 512;
+
+/// Wendet das Update Sequence Array an: prüft das Ende jedes 512-Byte-Blocks gegen
 /// die Update Sequence Number und stellt die Originalbytes wieder her.
 /// Ein komplett leerer Record (USA-Anzahl 0) bleibt unverändert.
-pub fn apply_fixup(buf: &mut [u8], bytes_per_sector: usize) -> Result<(), MftError> {
+///
+/// `_bytes_per_sector` bleibt aus Kompatibilität (Schnittstelle laut PLAN) erhalten,
+/// wird aber nicht als Schrittweite verwendet: die ist bei NTFS fest 512 Byte.
+pub fn apply_fixup(buf: &mut [u8], _bytes_per_sector: usize) -> Result<(), MftError> {
     if buf.len() < 8 {
         return Err(MftError::TooShort);
     }
@@ -161,21 +168,16 @@ pub fn apply_fixup(buf: &mut [u8], bytes_per_sector: usize) -> Result<(), MftErr
     if usa_cnt == 0 {
         return Ok(());
     }
-    if bytes_per_sector < 2 {
-        return Err(MftError::BadAttribute(format!(
-            "Sektorgröße {bytes_per_sector}"
-        )));
-    }
     let sectors = usa_cnt - 1;
     if usa_off < 8 || usa_off + 2 * usa_cnt > buf.len() {
         return Err(MftError::TooShort);
     }
-    if sectors * bytes_per_sector > buf.len() {
+    if sectors * FIXUP_STRIDE > buf.len() {
         return Err(MftError::TooShort);
     }
     let usn = [buf[usa_off], buf[usa_off + 1]];
     for i in 1..=sectors {
-        let end = i * bytes_per_sector - 2;
+        let end = i * FIXUP_STRIDE - 2;
         if buf[end..end + 2] != usn {
             return Err(MftError::FixupMismatch);
         }
@@ -195,6 +197,8 @@ struct FileNameAttr {
     namespace: u8,
     name: String,
     times: [FileTime; 3],
+    /// Feld 0x3C "EA/Reparse": bei Reparse-Points der Reparse-Tag (sonst 0).
+    reparse: u32,
 }
 
 /// Ein Attribut-Header mit den Feldern, die wir brauchen.
@@ -280,6 +284,7 @@ fn parse_file_name(v: &[u8]) -> Result<FileNameAttr, MftError> {
         namespace,
         name: String::from_utf16_lossy(&units),
         times,
+        reparse: u32_at(v, 60)?,
     })
 }
 
@@ -312,6 +317,7 @@ pub fn parse_record(buf: &[u8], record_no: u64) -> Result<Option<MftRecord>, Mft
     let mut allocated = 0u64;
     let mut ads_size = 0u64;
     let mut reparse_tag: Option<u32> = None;
+    let mut reparse_non_resident = false;
 
     for a in attributes(buf)? {
         match a.kind {
@@ -349,6 +355,7 @@ pub fn parse_record(buf: &[u8], record_no: u64) -> Result<Option<MftRecord>, Mft
             ATTR_REPARSE_POINT if !a.non_resident => {
                 reparse_tag = a.value().and_then(|v| u32_at(v, 0)).ok();
             }
+            ATTR_REPARSE_POINT => reparse_non_resident = true,
             _ => {}
         }
     }
@@ -360,6 +367,11 @@ pub fn parse_record(buf: &[u8], record_no: u64) -> Result<Option<MftRecord>, Mft
     }
     if ads_size > 0 {
         flags |= NodeFlags::HAS_ADS;
+    }
+    // Nicht residenter $REPARSE_POINT: Tag steht nicht im Record, aber im $FILE_NAME
+    // (Feld 0x3C). Fehlt er auch dort, bleibt REPARSE vorsichtshalber stehen.
+    if reparse_tag.is_none() && reparse_non_resident {
+        reparse_tag = best_name.as_ref().map(|f| f.reparse).filter(|&t| t != 0);
     }
     // REPARSE nur für echte Links (OneDrive-Platzhalter, Dedup usw. sind normale Dateien).
     if reparse_tag.is_some_and(|t| t & REPARSE_TAG_NAME_SURROGATE == 0) {

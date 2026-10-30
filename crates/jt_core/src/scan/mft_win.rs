@@ -176,6 +176,12 @@ pub(crate) fn scan_mft(
     meta.errors = errors;
     let root_name = format!("{letter}:\\");
     let mut tree = mft_parse::records_to_tree(records.into_iter(), meta, &root_name);
+    // Alle Records defekt bzw. leerer Baum: Fehler, damit scan() auf Walk zurückfällt.
+    if tree.children(tree.root()).next().is_none() {
+        return Err(ScanError::Unsupported(String::from(
+            "MFT lieferte keine gültigen Einträge",
+        )));
+    }
     tree.meta.duration_ms = t0.elapsed().as_millis() as u64;
     prog.phase = Phase::Done;
     progress(&prog);

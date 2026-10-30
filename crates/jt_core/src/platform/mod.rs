@@ -112,6 +112,23 @@ pub fn strip_long_prefix(path: &str) -> String {
     }
 }
 
+/// Laufwerkstyp von `GetDriveTypeW` → hat das Laufwerk einen Papierkorb?
+/// Nur feste lokale Laufwerke (`DRIVE_FIXED` = 3). Netzfreigaben (4), Wechseldatenträger
+/// wie USB-Sticks (2), CD (5), RAM-Disk (6) und Unbekanntes haben keinen; dort würde die
+/// Shell "in den Papierkorb" stillschweigend endgültig löschen.
+pub fn drive_type_has_recycle_bin(drive_type: u32) -> bool {
+    drive_type == 3
+}
+
+/// Fehler "kein Papierkorb" (`ErrorKind::Unsupported`); die GUI zeigt dafür einen
+/// eigenen Hinweis und verweist auf "Endgültig löschen" (mit zweiter Bestätigung).
+pub fn no_recycle_bin_error(path: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("kein Papierkorb auf diesem Laufwerk: {path}"),
+    )
+}
+
 /// Bitmaske von `GetLogicalDrives` → `["C:\\", "D:\\", …]`.
 pub fn drives_from_mask(mask: u32) -> Vec<String> {
     (0..26u8)

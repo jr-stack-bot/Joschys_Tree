@@ -18,6 +18,7 @@ pub struct TopState {
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     let lang = state.lang();
+    let allow_delete = state.deletion_allowed();
     let Some(tree) = state.tree.clone() else {
         no_tree(ui, lang);
         return;
@@ -75,7 +76,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 row.col(|ui| {
                     ui.label(tree.full_path(id));
                 });
-                row_interaction(&row.response(), lang, &tree, id, actions);
+                row_interaction(&row.response(), lang, &tree, id, actions, allow_delete);
             });
         });
 }

@@ -46,6 +46,12 @@ pub fn can_delete() -> bool {
     jt_core::platform::is_admin()
 }
 
+/// Löschen nur mit Admin-Rechten UND wenn der Baum ein frischer Live-Scan dieses
+/// Rechners ist (nie bei einem aus `.jtscan` geladenen Snapshot).
+pub fn delete_allowed(admin: bool, has_tree: bool, tree_is_live: bool) -> bool {
+    admin && has_tree && tree_is_live
+}
+
 /// Ersetzt Platzhalter wie `{n}` in übersetzten Texten.
 pub fn fill(template: &str, args: &[(&str, &str)]) -> String {
     let mut s = template.to_string();
@@ -155,6 +161,8 @@ impl Reporter {
 pub struct AppState {
     pub settings: Settings,
     pub tree: Option<Arc<Tree>>,
+    /// `true` nur, wenn `tree` aus einem Live-Scan stammt (nicht aus einem Snapshot).
+    pub tree_is_live: bool,
     /// Wird bei jeder Baumänderung erhöht; Caches vergleichen dagegen.
     pub tree_gen: u64,
     pub tab: Tab,
@@ -191,6 +199,7 @@ impl AppState {
         AppState {
             settings,
             tree: None,
+            tree_is_live: false,
             tree_gen: 1,
             tab: Tab::Tree,
             status: String::new(),
@@ -222,9 +231,16 @@ impl AppState {
         self.io_busy.is_some()
     }
 
+    /// Dürfen für den aktuellen Baum Lösch-Menüpunkte, -Dialoge und -Aktionen erscheinen?
+    pub fn deletion_allowed(&self) -> bool {
+        delete_allowed(can_delete(), self.tree.is_some(), self.tree_is_live)
+    }
+
     /// Neuen Baum übernehmen und alle Caches zurücksetzen.
-    pub fn set_tree(&mut self, tree: Tree) {
+    /// `live`: `true` für einen frischen Scan, `false` für einen geladenen Snapshot.
+    pub fn set_tree(&mut self, tree: Tree, live: bool) {
         self.tree = Some(Arc::new(tree));
+        self.tree_is_live = live;
         self.tree_gen += 1;
         self.selected = None;
         self.tree_view = Default::default();
@@ -363,7 +379,7 @@ impl JtApp {
                                 tr(lang, Key::StatusScanDone),
                                 &[("{entries}", &entries), ("{secs}", &format!("{secs:.1}"))],
                             );
-                            st.set_tree(tree);
+                            st.set_tree(tree, true);
                         }
                         Err(ScanError::Cancelled) => {
                             st.status = tr(lang, Key::StatusScanCancelled).to_string();
@@ -381,7 +397,7 @@ impl JtApp {
                         tr(lang, Key::SnapLoaded),
                         &[("{path}", &path.display().to_string())],
                     );
-                    st.set_tree(tree);
+                    st.set_tree(tree, false);
                 }
                 JobMsg::SnapshotSaved(path) => {
                     st.io_busy = None;
@@ -532,7 +548,7 @@ impl JtApp {
                 }
             }
             Action::AskDelete { id, permanent } => {
-                if can_delete() && tree.is_some() && !self.state.delete_running {
+                if self.state.deletion_allowed() && !self.state.delete_running {
                     self.state.dialogs.delete = Some(dialogs::DeleteDialog::new(id, permanent));
                 } else if !can_delete() {
                     self.state.status = tr(lang, Key::DelAdminOnly).to_string();
@@ -540,7 +556,7 @@ impl JtApp {
             }
             Action::ConfirmDelete { ids, permanent } => {
                 if let Some(t) = tree
-                    && can_delete()
+                    && self.state.deletion_allowed()
                 {
                     self.start_delete(ctx, t, ids, permanent);
                 }
@@ -775,6 +791,7 @@ impl JtApp {
         }
         self.state.delete_running = true;
         let gen_ = self.state.tree_gen;
+        let lang = self.state.lang();
         self.spawn(ctx, JobKind::Delete, move |_| {
             let paths: Vec<String> = ids.iter().map(|&id| tree.full_path(id)).collect();
             let res = if permanent {
@@ -795,7 +812,7 @@ impl JtApp {
                 gen_,
                 removed,
                 permanent,
-                error: res.err().map(|e| e.to_string()),
+                error: res.err().map(|e| delete_error_text(lang, permanent, &e)),
             }
         });
     }
@@ -1169,6 +1186,16 @@ fn load_history(
     })
 }
 
+/// Fehlertext fürs Löschen. "Kein Papierkorb" (`Unsupported` beim Papierkorb-Weg)
+/// bekommt einen eigenen Hinweis auf "Endgültig löschen".
+fn delete_error_text(lang: Lang, permanent: bool, e: &std::io::Error) -> String {
+    if !permanent && e.kind() == std::io::ErrorKind::Unsupported {
+        tr(lang, Key::DelNoRecycleBin).to_string()
+    } else {
+        e.to_string()
+    }
+}
+
 /// Startet das Programm per ShellExecuteW mit "runas" neu (UAC-Abfrage).
 #[cfg(windows)]
 fn restart_as_admin() -> std::io::Result<()> {
@@ -1228,6 +1255,40 @@ mod tests {
         #[cfg(not(windows))]
         assert!(!can_delete());
         assert_eq!(can_delete(), jt_core::platform::is_admin());
+    }
+
+    #[test]
+    fn delete_only_for_admin_and_live_scan() {
+        // Live-Scan als Admin: erlaubt.
+        assert!(delete_allowed(true, true, true));
+        // Aus .jtscan geladen: nie löschen, auch nicht als Admin.
+        assert!(!delete_allowed(true, true, false));
+        // Ohne Admin oder ohne Baum: nie.
+        assert!(!delete_allowed(false, true, true));
+        assert!(!delete_allowed(true, false, true));
+        assert!(!delete_allowed(false, false, false));
+    }
+
+    #[test]
+    fn set_tree_tracks_live_flag() {
+        let mut st = AppState::new(Settings::default());
+        st.set_tree(sample_tree(), true);
+        assert!(st.tree_is_live);
+        st.set_tree(sample_tree(), false);
+        assert!(!st.tree_is_live);
+        // Snapshot: deletion_allowed() bleibt aus, unabhängig von Admin-Rechten.
+        assert!(!st.deletion_allowed());
+    }
+
+    #[test]
+    fn no_recycle_bin_gets_own_message() {
+        let e = jt_core::platform::no_recycle_bin_error(r"\\server\share\x");
+        assert_eq!(
+            delete_error_text(Lang::De, false, &e),
+            tr(Lang::De, Key::DelNoRecycleBin)
+        );
+        // Beim endgültigen Löschen bleibt der Originaltext.
+        assert_eq!(delete_error_text(Lang::De, true, &e), e.to_string());
     }
 
     #[test]

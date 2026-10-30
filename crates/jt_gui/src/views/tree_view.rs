@@ -96,6 +96,7 @@ impl TreeViewState {
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     let lang = state.lang();
+    let allow_delete = state.deletion_allowed();
     let Some(tree) = state.tree.clone() else {
         no_tree(ui, lang);
         return;
@@ -227,7 +228,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                         actions.push(Action::ShowInTreemap(id));
                         ui.close();
                     }
-                    crate::views::node_menu(ui, lang, &tree, id, actions, false);
+                    crate::views::node_menu(ui, lang, &tree, id, actions, false, allow_delete);
                 });
             });
         });

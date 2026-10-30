@@ -199,6 +199,7 @@ keys! {
     DelRecycled => ("{n} Einträge in den Papierkorb verschoben.", "{n} items moved to the Recycle Bin."),
     DelFailed => ("Löschen fehlgeschlagen: {err}", "Delete failed: {err}"),
     DelAdminOnly => ("Löschen ist nur als Administrator möglich.", "Deleting is only possible as administrator."),
+    DelNoRecycleBin => ("Dieses Laufwerk hat keinen Papierkorb (z. B. Netzfreigabe oder USB-Stick). Nichts wurde gelöscht. Bitte \"Endgültig löschen\" verwenden.", "This drive has no Recycle Bin (e.g. network share or USB stick). Nothing was deleted. Please use \"Delete permanently\"."),
 
     // ---- Export-Dialog ----
     ExpTitle => ("Exportieren", "Export"),
