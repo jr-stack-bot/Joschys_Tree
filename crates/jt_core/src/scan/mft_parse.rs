@@ -26,6 +26,9 @@ const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
+const ATTR_REPARSE_POINT: u32 = 0xC0;
+/// Reparse-Tag-Bit "Name-Surrogate" (Symlink, Junction, Mountpoint).
+const REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
 const ATTR_END: u32 = 0xFFFF_FFFF;
 
 const RECORD_IN_USE: u16 = 0x0001;
@@ -308,6 +311,7 @@ pub fn parse_record(buf: &[u8], record_no: u64) -> Result<Option<MftRecord>, Mft
     let mut size = 0u64;
     let mut allocated = 0u64;
     let mut ads_size = 0u64;
+    let mut reparse_tag: Option<u32> = None;
 
     for a in attributes(buf)? {
         match a.kind {
@@ -342,6 +346,9 @@ pub fn parse_record(buf: &[u8], record_no: u64) -> Result<Option<MftRecord>, Mft
             // $ATTRIBUTE_LIST: verweist auf Erweiterungs-Records. Diese tragen ihre
             // Basis-Record-Nummer selbst und werden in records_to_tree zusammengeführt.
             ATTR_ATTRIBUTE_LIST => {}
+            ATTR_REPARSE_POINT if !a.non_resident => {
+                reparse_tag = a.value().and_then(|v| u32_at(v, 0)).ok();
+            }
             _ => {}
         }
     }
@@ -353,6 +360,10 @@ pub fn parse_record(buf: &[u8], record_no: u64) -> Result<Option<MftRecord>, Mft
     }
     if ads_size > 0 {
         flags |= NodeFlags::HAS_ADS;
+    }
+    // REPARSE nur für echte Links (OneDrive-Platzhalter, Dedup usw. sind normale Dateien).
+    if reparse_tag.is_some_and(|t| t & REPARSE_TAG_NAME_SURROGATE == 0) {
+        flags.remove(NodeFlags::REPARSE);
     }
     let (name, parent_ref, fn_times) = match best_name {
         Some(f) => (f.name, f.parent, Some(f.times)),
@@ -523,7 +534,7 @@ pub fn parse_chunk(
     bytes_per_sector: usize,
 ) -> (Vec<MftRecord>, u32) {
     use rayon::prelude::*;
-    if record_size == 0 {
+    if record_size < 48 {
         return (Vec::new(), 0);
     }
     let results: Vec<Result<Option<MftRecord>, MftError>> = buf

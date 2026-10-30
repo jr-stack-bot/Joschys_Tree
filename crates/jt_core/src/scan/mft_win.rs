@@ -114,7 +114,7 @@ pub(crate) fn scan_mft(
     let cluster = nd.BytesPerCluster as u64;
     let rec_size = nd.BytesPerFileRecordSegment as usize;
     let sector = nd.BytesPerSector as usize;
-    if cluster == 0 || rec_size < 256 || sector == 0 || rec_size % sector != 0 {
+    if cluster == 0 || rec_size < 256 || sector == 0 || !rec_size.is_multiple_of(sector) {
         return Err(ScanError::Unsupported(String::from(
             "unerwartete NTFS-Geometrie",
         )));

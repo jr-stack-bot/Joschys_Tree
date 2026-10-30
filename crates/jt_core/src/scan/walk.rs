@@ -182,7 +182,12 @@ fn walk_dir(path: &Path, depth: u32, ctx: &Ctx<'_>) -> (Vec<WEntry>, bool) {
             }
         };
         let mut info = entry_info(&md, &child_path, ctx);
-        let is_link = md.file_type().is_symlink() || info.flags.contains(NodeFlags::REPARSE);
+        // Nur echte Links (Symlink/Junction/Mountpoint = Name-Surrogate) gelten als REPARSE.
+        // Andere Reparse-Points (OneDrive-Platzhalter, Dedup) bleiben normale Einträge.
+        let is_link = md.file_type().is_symlink();
+        if !is_link {
+            info.flags.remove(NodeFlags::REPARSE);
+        }
         let is_dir = if is_link {
             info.flags |= NodeFlags::REPARSE;
             // Ziel nur ansehen, um Ordner-Links als Ordner anzuzeigen; nie hineingehen.
