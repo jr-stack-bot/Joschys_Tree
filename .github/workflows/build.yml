@@ -31,7 +31,7 @@ jobs:
       - name: Clippy
         shell: bash
         run: |
-          if ! cargo clippy --workspace --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.log; then
+          if ! cargo clippy --workspace --all-targets --message-format=short --color never -- -D warnings 2>&1 | tee clippy.log; then
             msg=$(grep -E 'error|warning' clippy.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=clippy (linux)::${msg}"
             exit 1
@@ -39,7 +39,7 @@ jobs:
       - name: Tests
         shell: bash
         run: |
-          if ! cargo test --workspace 2>&1 | tee test.log; then
+          if ! cargo test --workspace --color never 2>&1 | tee test.log; then
             msg=$(grep -E 'panicked|FAILED|failed|error' test.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=tests (linux)::${msg}"
             exit 1
@@ -65,7 +65,7 @@ jobs:
       - name: Clippy
         shell: bash
         run: |
-          if ! cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc --message-format=short -- -D warnings 2>&1 | tee clippy.log; then
+          if ! cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc --message-format=short --color never -- -D warnings 2>&1 | tee clippy.log; then
             msg=$(grep -E 'error|warning' clippy.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=clippy (windows)::${msg}"
             exit 1
@@ -73,7 +73,7 @@ jobs:
       - name: Tests jt_core
         shell: bash
         run: |
-          if ! cargo test -p jt_core --target x86_64-pc-windows-msvc 2>&1 | tee test.log; then
+          if ! cargo test -p jt_core --target x86_64-pc-windows-msvc --color never 2>&1 | tee test.log; then
             msg=$(grep -E 'panicked|FAILED|failed|error' test.log | head -60 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=tests (windows)::${msg}"
             exit 1

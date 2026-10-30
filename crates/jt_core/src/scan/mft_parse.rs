@@ -276,8 +276,10 @@ fn parse_file_name(v: &[u8]) -> Result<FileNameAttr, MftError> {
     let raw = slice(v, 66, len * 2)
         .map_err(|_| MftError::BadAttribute(String::from("$FILE_NAME-Name ragt heraus")))?;
     let units: Vec<u16> = raw
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     Ok(FileNameAttr {
         parent,
