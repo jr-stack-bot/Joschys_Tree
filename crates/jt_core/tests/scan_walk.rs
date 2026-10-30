@@ -115,7 +115,11 @@ fn scan_walk_unreadable_dir_counts_error_and_marks_access_denied() {
             assert_eq!(t.meta.errors, 0);
         } else {
             assert!(t.meta.errors >= 1);
-            assert!(t.node(id).flags.contains(jt_core::model::NodeFlags::ACCESS_DENIED));
+            assert!(
+                t.node(id)
+                    .flags
+                    .contains(jt_core::model::NodeFlags::ACCESS_DENIED)
+            );
             assert_eq!(t.node(0).size, 5);
         }
     }
