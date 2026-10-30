@@ -17,7 +17,9 @@ const FILETIME_UNIX_DIFF_SECS: i64 = 11_644_473_600;
 const FILETIME_TICKS_PER_SEC: i64 = 10_000_000;
 
 /// Windows FILETIME (100 ns seit 1601), 0 = unbekannt.
-#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug, Hash,
+)]
 pub struct FileTime(pub i64);
 
 impl FileTime {
@@ -188,18 +190,17 @@ impl Tree {
         let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
         let root_name = norm(&self.nodes[0].name);
         let p = norm(path);
-        let rest = if p == root_name {
+        if p == root_name {
             return Some(0);
-        } else if let Some(r) = p.strip_prefix(&root_name) {
-            r.strip_prefix('\\')
-                .or(if root_name.is_empty() || self.nodes[0].name.ends_with('\\') {
-                    Some(r)
-                } else {
-                    None
-                })?
-        } else {
-            return None;
-        };
+        }
+        let r = p.strip_prefix(&root_name)?;
+        let rest = r.strip_prefix('\\').or(
+            if root_name.is_empty() || self.nodes[0].name.ends_with('\\') {
+                Some(r)
+            } else {
+                None
+            },
+        )?;
         let mut cur = 0;
         for comp in rest.split('\\').filter(|c| !c.is_empty()) {
             cur = self
@@ -517,7 +518,12 @@ pub mod testutil {
             "system.dll",
             file(10000, 12288, t(2024, 1, 1), NodeFlags::SYSTEM),
         );
-        let mut page = file(50000, 53248, t(2026, 10, 1), NodeFlags::HIDDEN | NodeFlags::SYSTEM);
+        let mut page = file(
+            50000,
+            53248,
+            t(2026, 10, 1),
+            NodeFlags::HIDDEN | NodeFlags::SYSTEM,
+        );
         page.ads_size = 10;
         b.add_file(0, "pagefile.sys", page);
         b.finish()
