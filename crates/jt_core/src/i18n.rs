@@ -60,7 +60,7 @@ keys! {
     AppTitle => ("Joschys_Tree @ Joschy", "Joschys_Tree @ Joschy"),
     AppName => ("Joschys_Tree", "Joschys_Tree"),
     Branding => ("@ Joschy", "@ Joschy"),
-    Ok => ("OK", "OK"),
+    BtnOk => ("OK", "OK"),
     Cancel => ("Abbrechen", "Cancel"),
     Close => ("Schließen", "Close"),
     Yes => ("Ja", "Yes"),
@@ -77,7 +77,7 @@ keys! {
     Working => ("Wird bearbeitet …", "Working …"),
     Done => ("Fertig", "Done"),
     Unknown => ("unbekannt", "unknown"),
-    None => ("keine", "none"),
+    NoneLabel => ("keine", "none"),
     All => ("Alle", "All"),
     Copy => ("Kopieren", "Copy"),
 

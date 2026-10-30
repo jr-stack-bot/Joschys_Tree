@@ -107,10 +107,8 @@ impl MockReader {
             *c.entry(path.to_string()).or_default() += 1;
             c.values().sum::<u32>()
         };
-        if let Some((flag, n)) = self.cancel_after {
-            if total >= n {
-                flag.store(true, Ordering::SeqCst);
-            }
+        if let Some((flag, _)) = self.cancel_after.filter(|&(_, n)| total >= n) {
+            flag.store(true, Ordering::SeqCst);
         }
         self.content
             .get(path)
@@ -231,7 +229,7 @@ fn dup_cancel_returns_partial_without_panic() {
     }
     // sortiert nach Einsparpotenzial
     assert!(part.windows(2).all(|w| w[0].savings() >= w[1].savings()));
-    let _: &[DupGroup] = &part;
+    let _: &[DupGroup] = &part; // Typ-Prüfung der öffentlichen Ergebnisliste
 }
 
 #[test]
