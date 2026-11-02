@@ -17,9 +17,18 @@ Hinweis: Die `cfg(windows)`-Teile lassen sich nur unter Windows (bzw. in der CI)
 
 ## CI (GitHub Actions)
 
-Datei `.github/workflows/build.yml`, Trigger: Push auf `main`, Pull Requests, Tags `v*`.
+Datei `.github/workflows/build.yml`, Trigger: Push auf `main`, Pull Requests, Tags `v*`, manuell (`workflow_dispatch` mit optionalem Tag).
 - `linux-test`: fmt-check, clippy, `cargo test --workspace`.
-- `windows-build`: clippy und Release-Build für `x86_64-pc-windows-msvc` mit `+crt-static`, Upload der `JoschysTree.exe` als Artefakt. Bei Tag `v*` zusätzlich ein GitHub-Release mit der exe.
+- `windows-build`: clippy und Release-Build für `x86_64-pc-windows-msvc` mit `+crt-static`, Upload der `JoschysTree.exe` als Artefakt. 
+
+## Release erstellen
+
+Der Job `release` läuft nur, wenn `linux-test` und `windows-build` grün sind, und hängt `JoschysTree.exe` und `JoschysTree.exe.sha256` an ein GitHub-Release (mit automatischen Release-Notes). Zwei Wege:
+
+1. **Tag setzen:** `git tag v1.0.0 && git push origin v1.0.0`
+2. **Ohne lokalen Tag, auf GitHub:** Actions → build → Run workflow → Tag eintragen (z. B. `v1.0.0`) → Run workflow. Ohne Tag-Eingabe wird nur gebaut.
+
+Das Release ist danach ohne Login unter `/releases/latest` abrufbar.
 
 ## Manuelle Windows-Abnahme (12 Punkte)
 

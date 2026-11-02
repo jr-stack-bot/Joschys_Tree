@@ -5,6 +5,18 @@ Schneller, portabler Festplatten-Analyzer für Windows (Vorbilder: WizTree und T
 
 > Screenshot folgt: `docs/screenshot.png` (Platzhalter)
 
+## Download
+
+**[Neueste Version laden (GitHub Releases)](https://github.com/jr-stack-bot/joschys_tree/releases/latest)**
+
+- Datei `JoschysTree.exe` laden, keine Installation nötig.
+- **SmartScreen:** Die exe ist nicht signiert, Windows kann warnen. Dann "Weitere Informationen → Trotzdem ausführen".
+- **Prüfsumme prüfen** (optional): `JoschysTree.exe.sha256` aus dem Release laden und mit dieser PowerShell-Ausgabe vergleichen:
+  `Get-FileHash .\JoschysTree.exe -Algorithm SHA256`
+- **Administrator:** Nur mit Adminrechten gibt es den MFT-Schnellscan und das Löschen, sonst Nur-Lese-Modus.
+
+Warum Releases? Actions-Artefakte lädt GitHub nur eingeloggten Nutzern aus, Release-Dateien sind dagegen für jeden ohne Login herunterladbar.
+
 ## Funktionen
 
 **Kern**
@@ -35,12 +47,6 @@ Schneller, portabler Festplatten-Analyzer für Windows (Vorbilder: WizTree und T
 
 - Hardlinks: Der Verzeichnis-Scan (Walk) zählt eine Datei mit mehreren Hardlinks mehrfach, der MFT-Scan nur einmal (erster Name). Die Summen beider Scan-Arten können daher abweichen.
 
-## Download
-
-Fertige Builds gibt es bei GitHub unter **Actions** (Artefakt `JoschysTree-windows-x64`) und unter **Releases** (bei Versions-Tags `v*`).
-
-**Hinweis:** Die exe ist nicht signiert. Windows SmartScreen kann daher eine Warnung anzeigen ("Weitere Informationen", dann "Trotzdem ausführen").
-
 Bauen aus dem Quelltext: siehe [BUILD.md](BUILD.md).
 
 ## Lizenz
@@ -49,7 +55,7 @@ GNU Affero General Public License v3.0 oder später (AGPL-3.0-or-later), Volltex
 
 ## English
 
-Joschys_Tree is a fast, portable disk space analyzer for Windows (in the spirit of WizTree and TreeSize Pro): a single GUI executable written in Rust. With administrator rights it uses the MFT fast scan on local NTFS volumes and enables deleting; without admin rights it runs read-only with a regular directory scan. The exe is unsigned, so SmartScreen may warn. Download builds from GitHub Actions artifacts or Releases. Licensed under AGPL-3.0-or-later. Build instructions: see [BUILD.md](BUILD.md).
+Joschys_Tree is a fast, portable disk space analyzer for Windows (in the spirit of WizTree and TreeSize Pro): a single GUI executable written in Rust. With administrator rights it uses the MFT fast scan on local NTFS volumes and enables deleting; without admin rights it runs read-only with a regular directory scan. The exe is unsigned, so SmartScreen may warn. Download the exe from [GitHub Releases](https://github.com/jr-stack-bot/joschys_tree/releases/latest) (no login needed). Licensed under AGPL-3.0-or-later. Build instructions: see [BUILD.md](BUILD.md).
 
 ---
 Joschys_Tree @ Joschy
