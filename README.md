@@ -3,8 +3,6 @@
 
 Schneller, portabler Festplatten-Analyzer für Windows (Vorbilder: WizTree und TreeSize Pro). Eine einzelne `JoschysTree.exe`, geschrieben in Rust mit egui/eframe, nur GUI, ohne Installation.
 
-> Screenshot folgt: `docs/screenshot.png` (Platzhalter)
-
 ## Download
 
 **[Neueste Version laden (GitHub Releases)](https://github.com/jr-stack-bot/joschys_tree/releases/latest)**
@@ -16,6 +14,22 @@ Schneller, portabler Festplatten-Analyzer für Windows (Vorbilder: WizTree und T
 - **Administrator:** Nur mit Adminrechten gibt es den MFT-Schnellscan und das Löschen, sonst Nur-Lese-Modus.
 
 Warum Releases? Actions-Artefakte lädt GitHub nur eingeloggten Nutzern aus, Release-Dateien sind dagegen für jeden ohne Login herunterladbar.
+
+## Screenshots
+
+Baumansicht, dunkles Design (Standard):
+
+![Joschys_Tree Baumansicht, dunkel](docs/screenshot-dark.png)
+
+Baumansicht, helles Design:
+
+![Joschys_Tree Baumansicht, hell](docs/screenshot-light.png)
+
+Treemap, Farben nach Dateityp:
+
+![Joschys_Tree Treemap](docs/screenshot-treemap.png)
+
+<sub>Aufgenommen unter Linux (Scan von `/usr/lib`), daher Linux-Pfade und Ersatzschriften; unter Windows erscheinen Consolas und Bahnschrift.</sub>
 
 ## Funktionen
 
