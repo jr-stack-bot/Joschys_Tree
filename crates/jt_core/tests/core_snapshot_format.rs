@@ -78,3 +78,11 @@ fn format_number_and_time() {
     );
     assert_eq!(format::time(t, Lang::De).len(), 16);
 }
+
+#[test]
+fn format_secs_per_language() {
+    assert_eq!(format::secs(0.1, Lang::De), "0,1");
+    assert_eq!(format::secs(0.1, Lang::En), "0.1");
+    assert_eq!(format::secs(12.345, Lang::De), "12,3");
+    assert_eq!(format::secs(0.0, Lang::En), "0.0");
+}

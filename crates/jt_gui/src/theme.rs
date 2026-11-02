@@ -459,14 +459,50 @@ pub struct FontChoice {
     pub mono: Option<&'static str>,
 }
 
+/// Prüft, ob `bytes` eine Schrift ist, die epaint fehlerfrei laden kann.
+///
+/// epaint 0.37 parst Schriften in `FontFace::new` mit
+/// `skrifa::FontRef::from_index(bytes, index)` und bricht bei einem Fehler in
+/// `family.rs` mit `panic!` ab. Hier wird genau dieselbe Funktion (Index 0, wie bei
+/// `FontData::from_owned`) aufgerufen und zusätzlich strenger geprüft: alle Tabellen
+/// liegen innerhalb der Datei, die Pflichttabellen sind lesbar und die Schrift hat
+/// Zeichen und Umrisse. So fällt auch eine abgeschnittene Datei durch.
+pub fn font_bytes_valid(bytes: &[u8]) -> bool {
+    use skrifa::MetadataProvider as _;
+    use skrifa::raw::TableProvider as _;
+    let Ok(font) = skrifa::FontRef::from_index(bytes, 0) else {
+        return false;
+    };
+    let records = font.table_directory.table_records();
+    if records.is_empty() || !records.iter().all(|r| font.table_data(r.tag()).is_some()) {
+        return false;
+    }
+    let Ok(head) = font.head() else {
+        return false;
+    };
+    if head.units_per_em() == 0 || font.maxp().is_err() || font.hhea().is_err() {
+        return false;
+    }
+    if font.cmap().is_err() {
+        return false;
+    }
+    let Some(gid) = font.charmap().map('A') else {
+        return false;
+    };
+    let glyphs = font.outline_glyphs();
+    glyphs.format().is_some() && glyphs.get(gid).is_some()
+}
+
 /// Baut die Schrift-Definitionen. `read` liefert den Dateiinhalt einer Schrift
-/// (Dateiname wie "consola.ttf") oder `None`. Fehlt alles, bleibt egui-Standard.
+/// (Dateiname wie "consola.ttf") oder `None`. Nur gültige Dateien
+/// ([`font_bytes_valid`]) werden registriert, sonst der nächste Kandidat;
+/// fehlt alles, bleibt egui-Standard.
 pub fn font_definitions(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> (FontDefinitions, FontChoice) {
     let mut defs = FontDefinitions::default();
     let mut choice = FontChoice::default();
     let mut install = |name: &str, family: FontFamily, files: &[&'static str]| {
         for &f in files {
-            if let Some(bytes) = read(f) {
+            if let Some(bytes) = read(f).filter(|b| font_bytes_valid(b)) {
                 defs.font_data
                     .insert(name.to_owned(), Arc::new(FontData::from_owned(bytes)));
                 defs.families
@@ -609,7 +645,8 @@ mod tests {
         assert_eq!(ch, FontChoice::default());
         assert_eq!(defs, FontDefinitions::default());
         // Alles da: Bahnschrift + Consolas vorne.
-        let (defs, ch) = font_definitions(&|_| Some(vec![0u8; 4]));
+        let good = test_font();
+        let (defs, ch) = font_definitions(&|_| Some(good.clone()));
         assert_eq!(ch.title, Some("bahnschrift.ttf"));
         assert_eq!(ch.mono, Some("consola.ttf"));
         assert_eq!(defs.families[&FontFamily::Proportional][0], FONT_TITLE);
@@ -617,8 +654,100 @@ mod tests {
         // egui-Standard bleibt als Rückfall dahinter.
         assert!(defs.families[&FontFamily::Proportional].len() > 1);
         // Ohne Bahnschrift: Segoe UI.
-        let (_, ch) = font_definitions(&|f| (f == "segoeui.ttf").then(|| vec![0u8; 4]));
+        let (_, ch) = font_definitions(&|f| (f == "segoeui.ttf").then(|| good.clone()));
         assert_eq!(ch.title, Some("segoeui.ttf"));
         assert_eq!(ch.mono, Some("segoeui.ttf"));
+    }
+
+    /// Gültige Schrift ohne Windows-Pfad: die in egui eingebettete Standardschrift.
+    fn test_font() -> Vec<u8> {
+        let defs = FontDefinitions::default();
+        let name = &defs.families[&FontFamily::Proportional][0];
+        defs.font_data[name].bytes().to_vec()
+    }
+
+    #[test]
+    fn font_validation_accepts_good_rejects_broken() {
+        let good = test_font();
+        assert!(font_bytes_valid(&good));
+        // Auch die eingebettete Monospace-Standardschrift.
+        let defs = FontDefinitions::default();
+        let mono = &defs.families[&FontFamily::Monospace][0];
+        assert!(font_bytes_valid(defs.font_data[mono].bytes()));
+        // Leer, Zufallsbytes, abgeschnitten (Kopf ganz, Tabellen fehlen; halb).
+        assert!(!font_bytes_valid(&[]));
+        let mut x: u32 = 0x1234_5678;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        assert!(!font_bytes_valid(&noise));
+        assert!(!font_bytes_valid(&good[..512.min(good.len())]));
+        assert!(!font_bytes_valid(&good[..good.len() / 2]));
+        assert!(!font_bytes_valid(&good[..good.len() - 1]));
+    }
+
+    #[test]
+    fn invalid_font_files_are_skipped() {
+        let good = test_font();
+        // Bahnschrift kaputt, Segoe UI gültig: Segoe UI wird genommen.
+        // Consolas leer: Mono fällt auf Segoe UI zurück.
+        let read = |f: &str| match f {
+            "bahnschrift.ttf" => Some(vec![0u8; 64]),
+            "consola.ttf" => Some(Vec::new()),
+            "segoeui.ttf" => Some(good.clone()),
+            _ => None,
+        };
+        let (_, ch) = font_definitions(&read);
+        assert_eq!(ch.title, Some("segoeui.ttf"));
+        assert_eq!(ch.mono, Some("segoeui.ttf"));
+        // Alles kaputt: egui-Standard unverändert.
+        let (defs, ch) = font_definitions(&|_| Some(b"kaputt".to_vec()));
+        assert_eq!(ch, FontChoice::default());
+        assert_eq!(defs, FontDefinitions::default());
+    }
+
+    /// Echte Systemschriften (falls vorhanden) werden akzeptiert, und epaint lädt
+    /// sie wirklich ohne Panik, auch variable Schriften (wie Bahnschrift).
+    #[test]
+    fn system_fonts_validate_and_load_in_epaint() {
+        let pick = |dir: &str, only_variable: bool, n: usize| -> Vec<std::path::PathBuf> {
+            let mut v: Vec<_> = std::fs::read_dir(dir)
+                .map(|rd| rd.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            v.retain(|p: &std::path::PathBuf| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                (name.ends_with(".ttf") || name.ends_with(".otf"))
+                    && (!only_variable || name.contains("Variable"))
+            });
+            v.sort();
+            v.truncate(n);
+            v
+        };
+        let mut files = pick("/usr/share/fonts/truetype/dejavu", false, 2);
+        files.extend(pick("/usr/share/fonts/opentype/inter", false, 2));
+        files.extend(pick("/usr/share/fonts/truetype/google-fonts", true, 3));
+        for p in &files {
+            let bytes = std::fs::read(p).unwrap();
+            assert!(font_bytes_valid(&bytes), "{p:?}");
+            let (defs, ch) = font_definitions(&|_| Some(bytes.clone()));
+            assert!(ch.title.is_some() && ch.mono.is_some());
+            // Familien werden in epaint erst beim ersten Text geladen: erzwingen.
+            let mut fonts =
+                egui::epaint::text::Fonts::new(egui::epaint::text::TextOptions::default(), defs);
+            let mut view = fonts.with_pixels_per_point(1.0);
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                let g = view.layout_no_wrap(
+                    "Größe ÄÖÜ 123".into(),
+                    FontId::new(14.0, family),
+                    Color32::WHITE,
+                );
+                assert!(g.size().x > 0.0, "{p:?}");
+            }
+        }
     }
 }

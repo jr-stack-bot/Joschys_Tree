@@ -11,6 +11,7 @@ Schneller, portabler Festplatten-Analyzer für Windows (Vorbilder: WizTree und T
 - **SmartScreen:** Die exe ist nicht signiert, Windows kann warnen. Dann "Weitere Informationen → Trotzdem ausführen".
 - **Prüfsumme prüfen** (optional): `JoschysTree.exe.sha256` aus dem Release laden und mit dieser PowerShell-Ausgabe vergleichen:
   `Get-FileHash .\JoschysTree.exe -Algorithm SHA256`
+  Hinweis: `Get-FileHash` gibt den Hash in Großbuchstaben aus, die `.sha256`-Datei enthält ihn in Kleinbuchstaben. Verglichen wird ohne Beachtung der Groß-/Kleinschreibung, z. B. `(Get-FileHash .\JoschysTree.exe -Algorithm SHA256).Hash -eq (Get-Content .\JoschysTree.exe.sha256).Split(' ')[0]` (PowerShell `-eq` ignoriert Groß-/Kleinschreibung).
 - **Administrator:** Nur mit Adminrechten gibt es den MFT-Schnellscan und das Löschen, sonst Nur-Lese-Modus.
 
 Warum Releases? Actions-Artefakte lädt GitHub nur eingeloggten Nutzern aus, Release-Dateien sind dagegen für jeden ohne Login herunterladbar.

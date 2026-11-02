@@ -86,3 +86,9 @@ pub fn number(n: u64, lang: Lang) -> String {
     }
     out
 }
+
+/// Sekunden mit einer Nachkommastelle und Dezimaltrennzeichen der Sprache:
+/// 0.1 -> "0,1" (Deutsch) bzw. "0.1" (Englisch).
+pub fn secs(s: f32, lang: Lang) -> String {
+    format!("{s:.1}").replace('.', &dec_sep(lang).to_string())
+}

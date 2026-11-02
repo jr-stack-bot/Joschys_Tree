@@ -394,7 +394,10 @@ impl JtApp {
                             let entries = jt_core::format::number(tree.nodes.len() as u64, lang);
                             st.status = fill(
                                 tr(lang, Key::StatusScanDone),
-                                &[("{entries}", &entries), ("{secs}", &format!("{secs:.1}"))],
+                                &[
+                                    ("{entries}", &entries),
+                                    ("{secs}", &jt_core::format::secs(secs, lang)),
+                                ],
                             );
                             st.set_tree(tree, true);
                             #[cfg(debug_assertions)]

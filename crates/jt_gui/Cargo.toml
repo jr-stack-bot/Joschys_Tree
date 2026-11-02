@@ -22,6 +22,8 @@ rfd = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"
+# Schrift-Prüfung mit demselben Parser wie epaint 0.37 (dort transitiv, gleiche Version)
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
