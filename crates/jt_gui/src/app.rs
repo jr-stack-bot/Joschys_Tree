@@ -20,8 +20,9 @@ use jt_core::{FileTime, Key, Lang, NO_NODE, NodeId, Tree, tr};
 
 use crate::dialogs::{self, ContentKind, ExportDialog};
 use crate::settings::Settings;
+use crate::theme::Theme;
 use crate::views;
-use crate::{WINDOW_TITLE, footer, theme};
+use crate::{WINDOW_TITLE, footer, icons, theme, widgets};
 
 /// Mindestabstand zwischen zwei Fortschrittsmeldungen aus Hintergrund-Threads.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
@@ -332,11 +333,16 @@ pub struct JtApp {
 
 impl JtApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings = Settings::load();
-        theme::apply(&cc.egui_ctx, settings.dark);
+        #[allow(unused_mut)]
+        let mut state = AppState::new(Settings::load());
+        #[cfg(debug_assertions)]
+        crate::debug_hook::on_start(&mut state);
+        theme::install_fonts(&cc.egui_ctx);
+        theme::apply(&cc.egui_ctx, state.settings.dark);
+        theme::set_effects(&cc.egui_ctx, state.settings.effects);
         let (tx, rx) = unbounded();
         JtApp {
-            state: AppState::new(settings),
+            state,
             tx,
             rx,
             last_title: String::new(),
@@ -391,6 +397,10 @@ impl JtApp {
                                 &[("{entries}", &entries), ("{secs}", &format!("{secs:.1}"))],
                             );
                             st.set_tree(tree, true);
+                            #[cfg(debug_assertions)]
+                            if let Some(t) = st.tree.clone() {
+                                crate::debug_hook::after_scan(st, &t);
+                            }
                         }
                         Err(ScanError::Cancelled) => {
                             st.status = tr(lang, Key::StatusScanCancelled).to_string();
@@ -961,20 +971,30 @@ impl JtApp {
                 }
             });
             ui.menu_button(tr(lang, Key::MenuView), |ui| {
-                ui.label(tr(lang, Key::MenuTheme));
+                let t = Theme::of(ui);
+                widgets::section(ui, tr(lang, Key::MenuTheme), t.accent);
                 let mut dark = st.settings.dark;
-                ui.radio_value(&mut dark, true, tr(lang, Key::ThemeDark));
-                ui.radio_value(&mut dark, false, tr(lang, Key::ThemeLight));
+                widgets::choice(ui, &mut dark, true, tr(lang, Key::ThemeDark));
+                widgets::choice(ui, &mut dark, false, tr(lang, Key::ThemeLight));
                 if dark != st.settings.dark {
                     st.settings.dark = dark;
                     theme::apply(ui.ctx(), dark);
                     st.save_settings();
                 }
-                ui.separator();
-                ui.label(tr(lang, Key::MenuLanguage));
+                let mut fx = st.settings.effects;
+                if ui
+                    .checkbox(&mut fx, tr(lang, Key::MenuEffects))
+                    .on_hover_text(tr(lang, Key::EffectsHint))
+                    .changed()
+                {
+                    st.settings.effects = fx;
+                    theme::set_effects(ui.ctx(), fx);
+                    st.save_settings();
+                }
+                widgets::section(ui, tr(lang, Key::MenuLanguage), t.accent);
                 let mut l = st.settings.lang;
-                ui.radio_value(&mut l, Lang::De, tr(lang, Key::LangGerman));
-                ui.radio_value(&mut l, Lang::En, tr(lang, Key::LangEnglish));
+                widgets::choice(ui, &mut l, Lang::De, tr(lang, Key::LangGerman));
+                widgets::choice(ui, &mut l, Lang::En, tr(lang, Key::LangEnglish));
                 if l != st.settings.lang {
                     st.settings.lang = l;
                     st.save_settings();
@@ -1038,6 +1058,26 @@ impl JtApp {
                     ui.close();
                 }
             });
+            // Fensterkopf rechts: Eck-Dreieck, Titel in Akzent, roter Zierstrich.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let t = Theme::of(ui);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 3.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 0.0, t.red);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(tr(lang, Key::AppTitle))
+                            .font(widgets::mono(12.0))
+                            .color(t.accent_text),
+                    )
+                    .selectable(false),
+                );
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().add(egui::Shape::convex_polygon(
+                    icons::corner_wedge(r).to_vec(),
+                    t.accent,
+                    egui::Stroke::NONE,
+                ));
+            });
         });
     }
 
@@ -1045,7 +1085,8 @@ impl JtApp {
         let lang = self.state.lang();
         let st = &mut self.state;
         ui.horizontal(|ui| {
-            ui.label(tr(lang, Key::TargetLabel));
+            let t = Theme::of(ui);
+            ui.label(egui::RichText::new(widgets::upper(tr(lang, Key::TargetLabel))).color(t.dim));
             egui::ComboBox::from_id_salt("jt_target_combo")
                 .selected_text(tr(lang, Key::TargetDrives))
                 .width(110.0)
@@ -1071,27 +1112,21 @@ impl JtApp {
                     .desired_width(320.0),
             );
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui
-                .add_enabled(
-                    st.io_busy.is_none(),
-                    egui::Button::new(tr(lang, Key::Browse)),
-                )
-                .clicked()
-            {
+            if widgets::tool_button(ui, tr(lang, Key::Browse), st.io_busy.is_none()).clicked() {
                 st.actions.push(Action::BrowseFolder);
             }
             if st.scan.is_some() {
-                ui.spinner();
-                if ui.button(tr(lang, Key::MenuStopScan)).clicked() {
+                if widgets::danger_button(ui, tr(lang, Key::MenuStopScan), true).clicked() {
                     st.actions.push(Action::StopScan);
                 }
-            } else if ui.button(tr(lang, Key::MenuScan)).clicked() || enter {
+                widgets::busy(ui);
+            } else if widgets::primary_button(ui, tr(lang, Key::MenuScan), true).clicked() || enter
+            {
                 st.actions.push(Action::StartScan);
             }
             if !jt_core::platform::is_admin() && cfg!(windows) {
-                ui.separator();
-                if ui
-                    .button(tr(lang, Key::MenuRestartAsAdmin))
+                ui.add_space(8.0);
+                if widgets::tool_button(ui, tr(lang, Key::MenuRestartAsAdmin), true)
                     .on_hover_text(tr(lang, Key::ReadOnlyHint))
                     .clicked()
                 {
@@ -1114,14 +1149,56 @@ impl eframe::App for JtApp {
             self.last_title = title;
         }
 
-        egui::Panel::top("jt_menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("jt_target").show(ui, |ui| self.target_bar(ui));
-        egui::Panel::bottom("jt_footer").show(ui, |ui| footer::show(ui, &self.state));
+        let t = Theme::get(self.state.settings.dark);
+        let fx = self.state.settings.effects;
+        let line = egui::Stroke::new(1.0, t.line);
+        egui::Panel::top("jt_menu")
+            .frame(
+                egui::Frame::new()
+                    .fill(t.core_lo)
+                    .inner_margin(egui::Margin::symmetric(8, 3)),
+            )
+            .show(ui, |ui| {
+                if fx {
+                    widgets::scanlines(
+                        ui.painter(),
+                        ui.max_rect().expand2(egui::vec2(8.0, 3.0)),
+                        t,
+                    );
+                }
+                self.menu_bar(ui)
+            });
+        egui::Panel::top("jt_target")
+            .frame(
+                egui::Frame::new()
+                    .fill(t.panel)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ui, |ui| self.target_bar(ui));
+        egui::Panel::bottom("jt_footer")
+            .frame(
+                egui::Frame::new()
+                    .fill(t.bg)
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
+            .show(ui, |ui| footer::show(ui, &self.state));
         egui::Panel::right("jt_details")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(310.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(t.panel)
+                    .stroke(line)
+                    .inner_margin(egui::Margin::same(10)),
+            )
             .show(ui, |ui| views::details::show(ui, &mut self.state));
-        egui::CentralPanel::default().show(ui, |ui| views::show(ui, &mut self.state));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(t.bg)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ui, |ui| views::show(ui, &mut self.state));
         dialogs::show(&ctx, &mut self.state);
 
         self.process_actions(&ctx);

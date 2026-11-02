@@ -8,8 +8,9 @@ use jt_core::stats::TypeStat;
 use jt_core::{Key, tr};
 
 use crate::app::AppState;
-use crate::theme;
-use crate::views::{fmt_percent, no_tree, percent_bar};
+use crate::theme::{FileCat, Theme, bar_gradient, bar_level};
+use crate::views::{cell, fmt_percent, no_tree};
+use crate::widgets::{self, BarBatch, TableFx};
 
 const AGE_KEYS: [Key; 6] = [
     Key::AgeLt1M,
@@ -41,42 +42,54 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     }
     let total = tree.node(tree.root()).size.max(1);
 
+    let t = Theme::of(ui);
     // Alters-Histogramm
-    ui.strong(tr(lang, Key::AgeTitle));
+    widgets::section(ui, tr(lang, Key::AgeTitle), t.warn);
     let age_total: u64 = ts.ages.iter().sum::<u64>().max(1);
     ui.horizontal_wrapped(|ui| {
         for (k, v) in AGE_KEYS.iter().zip(ts.ages) {
             ui.vertical(|ui| {
-                ui.set_width(130.0);
-                ui.label(tr(lang, *k));
-                let (rect, _) = ui.allocate_exact_size(vec2(120.0, 14.0), Sense::hover());
+                ui.set_width(138.0);
+                cell(ui, tr(lang, *k), t.text2);
+                let frac = v as f32 / age_total as f32;
+                let (rect, _) = ui.allocate_exact_size(vec2(130.0, 10.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+                p.rect_filled(rect, 0.0, t.row);
                 let mut f = rect;
-                f.set_width(rect.width() * (v as f32 / age_total as f32));
-                p.rect_filled(f, 2.0, theme::bar_color(ui.visuals().dark_mode));
-                ui.small(format!(
-                    "{} ({})",
-                    bytes(v, lang),
-                    fmt_percent(v as f32 / age_total as f32, lang)
-                ));
+                f.set_width(rect.width() * frac);
+                let (a, b) = bar_gradient(t, bar_level(frac));
+                widgets::paint_gradient(p, f, a, b);
+                p.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0, t.line),
+                    egui::StrokeKind::Inside,
+                );
+                cell(
+                    ui,
+                    format!("{} ({})", bytes(v, lang), fmt_percent(frac, lang)),
+                    t.text,
+                );
             });
         }
     });
-    ui.separator();
-    ui.strong(tr(lang, Key::TypesTitle));
+    ui.add_space(6.0);
+    widgets::section(ui, tr(lang, Key::TypesTitle), t.accent);
     let stats = &ts.stats;
+    let mut fx = TableFx::begin(ui, "jt_types_table");
+    let mut bars = BarBatch::default();
     TableBuilder::new(ui)
         .id_salt("jt_types_table")
         .striped(true)
         .resizable(true)
+        .sense(Sense::hover())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::initial(140.0).clip(true))
         .column(Column::initial(80.0))
         .column(Column::initial(90.0))
         .column(Column::initial(90.0))
         .column(Column::remainder().at_least(100.0))
-        .header(22.0, |mut h| {
+        .header(24.0, |mut h| {
             for k in [
                 Key::ColExtension,
                 Key::ColFiles,
@@ -85,33 +98,40 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 Key::ColPercent,
             ] {
                 h.col(|ui| {
-                    ui.strong(tr(lang, k));
+                    widgets::header_cell(ui, tr(lang, k), None);
                 });
             }
         })
         .body(|body| {
-            body.rows(20.0, stats.len(), |mut row| {
-                let s = &stats[row.index()];
+            body.rows(22.0, stats.len(), |mut row| {
+                let i = row.index();
+                let s = &stats[i];
                 row.col(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                    fx.mark(ui, i as u64, false);
+                    ui.add_space(6.0);
+                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
                     ui.painter()
-                        .rect_filled(r, 2.0, theme::color_for_ext(&s.ext));
+                        .rect_filled(r, 0.0, FileCat::from_ext(&s.ext).color());
                     if s.ext.is_empty() {
-                        ui.label(tr(lang, Key::NoExtension));
+                        cell(ui, tr(lang, Key::NoExtension), t.text2);
                     } else {
-                        ui.label(format!(".{}", s.ext));
+                        cell(ui, format!(".{}", s.ext), t.text);
                     }
                 });
                 row.col(|ui| {
-                    ui.label(number(s.files, lang));
+                    cell(ui, number(s.files, lang), t.text2);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(s.size, lang));
+                    cell(ui, bytes(s.size, lang), t.text);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(s.allocated, lang));
+                    cell(ui, bytes(s.allocated, lang), t.text2);
                 });
-                row.col(|ui| percent_bar(ui, s.size as f32 / total as f32, lang));
+                row.col(|ui| {
+                    widgets::percent_bar(ui, s.size as f32 / total as f32, lang, true, &mut bars);
+                });
             });
         });
+    bars.flush(ui);
+    fx.end(ui);
 }

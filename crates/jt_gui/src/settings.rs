@@ -23,6 +23,8 @@ pub struct Settings {
     pub dup_min_size: u64,
     /// Maximale Tiefe beim Baum-Export.
     pub export_depth: u32,
+    /// Zier-Effekte (Leuchten, Scanlines) anzeigen.
+    pub effects: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +36,7 @@ impl Default for Settings {
             prefer_mft: true,
             dup_min_size: 1024 * 1024,
             export_depth: 3,
+            effects: true,
         }
     }
 }

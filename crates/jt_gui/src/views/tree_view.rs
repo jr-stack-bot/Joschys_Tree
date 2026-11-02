@@ -3,17 +3,20 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, Sense, Ui};
+use eframe::egui::{self, Rect, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use jt_core::aggregate::{SortKey, sorted_children};
 use jt_core::format::{bytes, number};
-use jt_core::{Key, NO_NODE, NodeId, Tree, tr};
+use jt_core::{Key, NO_NODE, NodeFlags, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState};
-use crate::views::{age_days, fill_n, fmt_time, frac_of_parent, no_tree, percent_bar};
+use crate::icons::{self, NodeIcon};
+use crate::theme::{FileCat, Theme, lerp_color, with_alpha};
+use crate::views::{age_days, cell, fill_n, fmt_time, frac_of_parent, no_tree};
+use crate::widgets::{self, BarBatch, TableFx};
 
-const ROW_H: f32 = 20.0;
-const INDENT: f32 = 14.0;
+const ROW_H: f32 = 22.0;
+const INDENT: f32 = 16.0;
 
 /// Zustand der Baumtabelle. Die sichtbaren Zeilen werden nur bei Änderungen neu aufgebaut.
 pub struct TreeViewState {
@@ -117,6 +120,9 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     let (sort, desc) = (tv.sort, tv.desc);
     let rows = &tv.rows;
     let expanded = &tv.expanded;
+    let t = Theme::of(ui);
+    let mut fx = TableFx::begin(ui, "jt_tree_table");
+    let mut bars = BarBatch::default();
 
     let mut table = TableBuilder::new(ui)
         .id_salt("jt_tree_table")
@@ -124,14 +130,14 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         .resizable(true)
         .sense(Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::initial(320.0).at_least(120.0).clip(true))
+        .column(Column::initial(330.0).at_least(120.0).clip(true))
         .column(Column::initial(85.0))
         .column(Column::initial(85.0))
-        .column(Column::initial(110.0))
+        .column(Column::initial(150.0).at_least(90.0))
         .column(Column::initial(75.0))
         .column(Column::initial(65.0))
-        .column(Column::initial(120.0))
-        .column(Column::initial(120.0))
+        .column(Column::initial(125.0))
+        .column(Column::initial(125.0))
         .column(Column::remainder().at_least(60.0));
     if let Some(r) = scroll_row {
         table = table.scroll_to_row(r, Some(egui::Align::Center));
@@ -140,19 +146,9 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         .header(ROW_H + 2.0, |mut h| {
             let mut head = |h: &mut egui_extras::TableRow, key: Key, sk: Option<SortKey>| {
                 h.col(|ui| {
-                    let mut text = tr(lang, key).to_string();
-                    if sk == Some(sort) {
-                        text.push_str(if desc { " ▼" } else { " ▲" });
-                    }
-                    match sk {
-                        Some(k) => {
-                            if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                                sort_click = Some(k);
-                            }
-                        }
-                        None => {
-                            ui.strong(text);
-                        }
+                    let state = sk.map(|k| (k == sort).then_some(desc));
+                    if widgets::header_cell(ui, tr(lang, key), state).clicked() {
+                        sort_click = sk;
                     }
                 });
             };
@@ -170,50 +166,99 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             body.rows(ROW_H, rows.len(), |mut row| {
                 let (id, depth) = rows[row.index()];
                 let n = tree.node(id);
-                row.set_selected(selected == Some(id));
+                let is_sel = selected == Some(id);
+                row.set_selected(is_sel);
+                let (main, weak) = if is_sel {
+                    (t.sel_text, t.sel_text)
+                } else if n.is_dir() {
+                    (t.text_hi, t.text2)
+                } else {
+                    (t.text, t.text2)
+                };
                 row.col(|ui| {
-                    ui.add_space(depth as f32 * INDENT);
+                    fx.mark(ui, u64::from(id), is_sel);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_space(4.0 + depth as f32 * INDENT);
+                    let (er, eresp) =
+                        ui.allocate_exact_size(egui::vec2(INDENT, ROW_H), Sense::click());
                     if n.is_dir() && n.first_child != NO_NODE {
                         let open = expanded.contains(&id);
-                        if ui
-                            .add(egui::Button::new(if open { "▾" } else { "▸" }).frame(false))
-                            .clicked()
-                        {
+                        let hov = eresp.hovered();
+                        let frame = if hov || open { t.accent } else { t.dim };
+                        let sign = if hov { t.accent_text } else { t.text };
+                        icons::paint_expander(ui.painter(), er.center(), 9.0, open, frame, sign);
+                        if eresp.clicked() {
                             toggles.push(id);
                         }
+                    }
+                    let (ir, _) = ui.allocate_exact_size(egui::vec2(16.0, ROW_H), Sense::hover());
+                    let ir = Rect::from_center_size(ir.center(), egui::vec2(14.0, 13.0));
+                    let reparse = n.flags.contains(NodeFlags::REPARSE).then_some(t.warn);
+                    let locked = n.flags.contains(NodeFlags::ACCESS_DENIED).then_some(t.err);
+                    if n.is_dir() {
+                        icons::paint_node_icon(
+                            ui.painter(),
+                            ir,
+                            NodeIcon::Folder,
+                            t.accent,
+                            with_alpha(t.accent, if t.dark { 60 } else { 90 }),
+                            reparse,
+                            locked,
+                        );
                     } else {
-                        ui.add_space(INDENT);
+                        let c = FileCat::from_ext(tree.ext_of(id)).color();
+                        let c = if t.dark {
+                            c
+                        } else {
+                            lerp_color(c, t.text, 0.35)
+                        };
+                        icons::paint_node_icon(
+                            ui.painter(),
+                            ir,
+                            NodeIcon::File,
+                            c,
+                            c,
+                            reparse,
+                            locked,
+                        );
                     }
-                    let icon = if n.is_dir() { "📁" } else { "📄" };
-                    ui.label(format!("{icon} {}", n.name));
+                    cell(ui, &*n.name, main);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(n.size, lang));
+                    cell(ui, bytes(n.size, lang), main);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(n.allocated, lang));
+                    cell(ui, bytes(n.allocated, lang), weak);
                 });
-                row.col(|ui| percent_bar(ui, frac_of_parent(&tree, id), lang));
+                row.col(|ui| {
+                    widgets::percent_bar(
+                        ui,
+                        frac_of_parent(&tree, id),
+                        lang,
+                        id != tree.root(),
+                        &mut bars,
+                    )
+                });
                 row.col(|ui| {
                     if n.is_dir() {
-                        ui.label(number(u64::from(n.file_count), lang));
+                        cell(ui, number(u64::from(n.file_count), lang), weak);
                     }
                 });
                 row.col(|ui| {
                     if n.is_dir() {
-                        ui.label(number(u64::from(n.dir_count), lang));
+                        cell(ui, number(u64::from(n.dir_count), lang), weak);
                     }
                 });
                 row.col(|ui| {
-                    ui.label(fmt_time(n.modified, lang));
+                    cell(ui, fmt_time(n.modified, lang), weak);
                 });
                 row.col(|ui| {
-                    ui.label(fmt_time(n.accessed, lang))
+                    cell(ui, fmt_time(n.accessed, lang), weak)
                         .on_hover_text(tr(lang, Key::DetAccessNote));
                 });
                 row.col(|ui| {
                     if let Some(d) = age_days(n, now) {
-                        ui.label(fill_n(tr(lang, Key::AgeDays), d));
+                        cell(ui, fill_n(tr(lang, Key::AgeDays), d), weak);
                     }
                 });
                 let resp = row.response();
@@ -232,6 +277,8 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 });
             });
         });
+    bars.flush(ui);
+    fx.end(ui);
     for id in toggles {
         tv.toggle(id);
     }

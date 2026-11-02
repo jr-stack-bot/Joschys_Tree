@@ -8,7 +8,9 @@ use jt_core::format::bytes;
 use jt_core::{Key, NodeId, tr};
 
 use crate::app::{AppState, SEARCH_LIMIT, fill};
-use crate::views::{fmt_time, no_tree, row_interaction};
+use crate::theme::Theme;
+use crate::views::{cell, fmt_time, no_tree, row_interaction};
+use crate::widgets::{self, TableFx};
 
 /// Eingabefelder als Text, damit leere Felder "kein Filter" bedeuten.
 #[derive(Default)]
@@ -93,17 +95,20 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             ui.end_row();
             ui.label(tr(lang, Key::FltAgeField));
             ui.horizontal(|ui| {
-                ui.radio_value(
+                widgets::choice(
+                    ui,
                     &mut s.age_field,
                     AgeField::Modified,
                     tr(lang, Key::FltAgeModified),
                 );
-                ui.radio_value(
+                widgets::choice(
+                    ui,
                     &mut s.age_field,
                     AgeField::Accessed,
                     tr(lang, Key::FltAgeAccessed),
                 );
-                ui.radio_value(
+                widgets::choice(
+                    ui,
                     &mut s.age_field,
                     AgeField::Created,
                     tr(lang, Key::FltAgeCreated),
@@ -114,20 +119,23 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             ui.end_row();
         });
     ui.horizontal(|ui| {
-        if ui.button(tr(lang, Key::FltApply)).clicked() {
+        if widgets::primary_button(ui, tr(lang, Key::FltApply), true).clicked() {
             run = true;
         }
-        if ui.button(tr(lang, Key::FltClear)).clicked() {
+        if widgets::tool_button(ui, tr(lang, Key::FltClear), true).clicked() {
             *s = SearchState::default();
         }
         if s.searched {
-            ui.label(fill(
-                tr(lang, Key::FltResults),
-                &[(
-                    "{n}",
-                    &jt_core::format::number(s.results.len() as u64, lang),
-                )],
-            ));
+            ui.colored_label(
+                Theme::of(ui).accent_text,
+                fill(
+                    tr(lang, Key::FltResults),
+                    &[(
+                        "{n}",
+                        &jt_core::format::number(s.results.len() as u64, lang),
+                    )],
+                ),
+            );
             if s.results.len() >= SEARCH_LIMIT {
                 ui.colored_label(ui.visuals().warn_fg_color, tr(lang, Key::FltLimitReached));
             }
@@ -138,10 +146,12 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         s.results = jt_core::filter::search(&tree, tree.root(), &f, now, SEARCH_LIMIT);
         s.searched = true;
     }
-    ui.separator();
+    ui.add_space(4.0);
+    let t = Theme::of(ui);
     let results = &s.results;
     let selected = state.selected;
     let actions = &mut state.actions;
+    let mut fx = TableFx::begin(ui, "jt_search_table");
     TableBuilder::new(ui)
         .id_salt("jt_search_table")
         .striped(true)
@@ -152,33 +162,42 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         .column(Column::initial(90.0))
         .column(Column::initial(130.0))
         .column(Column::remainder().at_least(200.0).clip(true))
-        .header(22.0, |mut h| {
+        .header(24.0, |mut h| {
             for k in [Key::ColName, Key::ColSize, Key::ColModified, Key::ColPath] {
                 h.col(|ui| {
-                    ui.strong(tr(lang, k));
+                    widgets::header_cell(ui, tr(lang, k), None);
                 });
             }
         })
         .body(|body| {
-            body.rows(20.0, results.len(), |mut row| {
+            body.rows(22.0, results.len(), |mut row| {
                 let id = results[row.index()];
                 let n = tree.node(id);
-                row.set_selected(selected == Some(id));
+                let is_sel = selected == Some(id);
+                row.set_selected(is_sel);
+                let (main, weak) = if is_sel {
+                    (t.sel_text, t.sel_text)
+                } else {
+                    (t.text, t.text2)
+                };
                 row.col(|ui| {
-                    ui.label(&*n.name);
+                    fx.mark(ui, u64::from(id), is_sel);
+                    ui.add_space(6.0);
+                    cell(ui, &*n.name, main);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(n.size, lang));
+                    cell(ui, bytes(n.size, lang), main);
                 });
                 row.col(|ui| {
-                    ui.label(fmt_time(n.modified, lang));
+                    cell(ui, fmt_time(n.modified, lang), weak);
                 });
                 row.col(|ui| {
-                    ui.label(tree.full_path(id));
+                    cell(ui, tree.full_path(id), weak);
                 });
                 row_interaction(&row.response(), lang, &tree, id, actions, allow_delete);
             });
         });
+    fx.end(ui);
 }
 
 fn enter(resp: egui::Response, ui: &Ui) -> bool {

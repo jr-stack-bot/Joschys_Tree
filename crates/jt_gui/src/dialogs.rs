@@ -7,6 +7,8 @@ use jt_core::format::bytes;
 use jt_core::{Key, Lang, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, fill};
+use crate::theme::Theme;
+use crate::widgets;
 
 #[derive(Default)]
 pub struct Dialogs {
@@ -166,10 +168,10 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
             ui.label(fill(tr(lang, Key::DelRecycleText), &[("{n}", &count_s)]));
             ui.monospace(&path);
             ui.horizontal(|ui| {
-                if ui.button(tr(lang, Key::CtxRecycle)).clicked() {
+                if widgets::danger_button(ui, tr(lang, Key::CtxRecycle), true).clicked() {
                     confirm = true;
                 }
-                if ui.button(tr(lang, Key::Cancel)).clicked() {
+                if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
                     close = true;
                 }
             });
@@ -182,10 +184,10 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
                 &[("{n}", &count_s), ("{size}", &bytes(size, lang))],
             ));
             ui.horizontal(|ui| {
-                if ui.button(tr(lang, Key::DelContinue)).clicked() {
+                if widgets::danger_button(ui, tr(lang, Key::DelContinue), true).clicked() {
                     dlg.step = 2;
                 }
-                if ui.button(tr(lang, Key::Cancel)).clicked() {
+                if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
                     close = true;
                 }
             });
@@ -200,12 +202,16 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
                 ui.colored_label(ui.visuals().warn_fg_color, tr(lang, Key::DelWrongWord));
             }
             ui.horizontal(|ui| {
-                let btn = egui::Button::new(tr(lang, Key::DelConfirmButton))
-                    .fill(egui::Color32::from_rgb(0xb0, 0x20, 0x20));
+                let t = Theme::of(ui);
+                let btn = egui::Button::new(
+                    egui::RichText::new(tr(lang, Key::DelConfirmButton))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(t.red);
                 if ui.add_enabled(ok, btn).clicked() {
                     confirm = true;
                 }
-                if ui.button(tr(lang, Key::Cancel)).clicked() {
+                if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
                     close = true;
                 }
             });
@@ -258,7 +264,7 @@ fn export_dialog(ctx: &Context, state: &mut AppState) {
                         ExportFormat::Html,
                         ExportFormat::Pdf,
                     ] {
-                        ui.radio_value(&mut dlg.format, f, format_label(lang, f));
+                        widgets::choice(ui, &mut dlg.format, f, format_label(lang, f));
                     }
                 });
                 ui.end_row();
@@ -272,7 +278,7 @@ fn export_dialog(ctx: &Context, state: &mut AppState) {
                         (ContentKind::Delta, has_delta),
                     ] {
                         ui.add_enabled_ui(enabled, |ui| {
-                            ui.radio_value(&mut dlg.content, c, tr(lang, content_key(c)));
+                            widgets::choice(ui, &mut dlg.content, c, tr(lang, content_key(c)));
                         });
                     }
                 });
@@ -294,10 +300,10 @@ fn export_dialog(ctx: &Context, state: &mut AppState) {
             });
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button(tr(lang, Key::ExpButton)).clicked() {
+            if widgets::primary_button(ui, tr(lang, Key::ExpButton), true).clicked() {
                 run = true;
             }
-            if ui.button(tr(lang, Key::Cancel)).clicked() {
+            if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
                 close = true;
             }
         });
@@ -325,7 +331,27 @@ fn about_dialog(ctx: &Context, state: &mut AppState) {
     let lang = state.lang();
     let mut close = false;
     let resp = Modal::new(Id::unique("jt_about_modal")).show(ctx, |ui| {
-        ui.heading(tr(lang, Key::AboutTitle));
+        let t = Theme::of(ui);
+        let (r, _) = ui.allocate_exact_size(egui::vec2(360.0, 30.0), egui::Sense::hover());
+        // Schließen-Kreuz oben rechts (gezeichnet, keine Glyphe).
+        let xr = egui::Rect::from_center_size(
+            egui::pos2(r.right() - 8.0, r.center().y),
+            egui::vec2(16.0, 16.0),
+        );
+        let xresp = ui.interact(xr, ui.scope_id().with("jt_about_x"), egui::Sense::click());
+        let xc = if xresp.hovered() { t.red } else { t.dim };
+        crate::icons::paint_cross(ui.painter(), xr.shrink(4.0), egui::Stroke::new(1.5, xc));
+        if xresp.clicked() {
+            close = true;
+        }
+        widgets::fringe_text(
+            ui.painter(),
+            r.left_center(),
+            egui::Align2::LEFT_CENTER,
+            tr(lang, Key::AboutTitle),
+            widgets::title_font(22.0),
+            t,
+        );
         ui.label(tr(lang, Key::AboutText));
         ui.label(format!(
             "{} {}",
@@ -333,8 +359,8 @@ fn about_dialog(ctx: &Context, state: &mut AppState) {
             env!("CARGO_PKG_VERSION")
         ));
         ui.label(tr(lang, Key::AboutLicense));
-        ui.strong(jt_core::BRANDING);
-        if ui.button(tr(lang, Key::Close)).clicked() {
+        ui.colored_label(t.accent_text, jt_core::BRANDING);
+        if widgets::tool_button(ui, tr(lang, Key::Close), true).clicked() {
             close = true;
         }
     });

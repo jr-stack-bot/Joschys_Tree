@@ -375,6 +375,9 @@ keys! {
     CtxShowInTreemap => ("In Treemap zeigen", "Show in treemap"),
     UnitMibSuffix => (" MiB", " MiB"),
     DelTreeChanged => ("Der Baum hat sich geändert – Löschen abgebrochen, nichts wurde gelöscht.", "The tree has changed – deletion cancelled, nothing was deleted."),
+    // ---- Design (Reaktor-Stil) ----
+    MenuEffects => ("Effekte (Leuchten, Scanlines)", "Effects (glow, scanlines)"),
+    EffectsHint => ("Schaltet Leuchten und Scanlines ab, z. B. für Fernwartung (RDP).", "Turns off glow and scanlines, e.g. for remote desktop (RDP)."),
 }
 
 /// Für den Vollständigkeitstest.

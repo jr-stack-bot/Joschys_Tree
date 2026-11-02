@@ -11,7 +11,9 @@ use jt_core::format::{bytes, number};
 use jt_core::{Key, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, fill, is_attached};
-use crate::views::{no_tree, row_interaction};
+use crate::theme::Theme;
+use crate::views::{cell, no_tree, row_interaction};
+use crate::widgets::{self, TableFx};
 
 /// Laufende Duplikat-Suche.
 pub struct DupRun {
@@ -86,25 +88,26 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         }
         match &ds.running {
             Some(run) => {
-                ui.spinner();
+                widgets::busy(ui);
                 let p = if run.total == 0 {
                     0.0
                 } else {
                     run.done as f32 / run.total as f32
                 };
-                ui.add(egui::ProgressBar::new(p).desired_width(200.0).text(fill(
+                let text = fill(
                     tr(lang, Key::DupProgress),
                     &[
                         ("{done}", &number(run.done, lang)),
                         ("{total}", &number(run.total, lang)),
                     ],
-                )));
-                if ui.button(tr(lang, Key::Cancel)).clicked() {
+                );
+                widgets::progress(ui, p, &text, 200.0);
+                if widgets::danger_button(ui, tr(lang, Key::Cancel), true).clicked() {
                     state.actions.push(Action::CancelDuplicates);
                 }
             }
             None => {
-                if ui.button(tr(lang, Key::DupStart)).clicked() {
+                if widgets::primary_button(ui, tr(lang, Key::DupStart), true).clicked() {
                     state.actions.push(Action::StartDuplicates);
                 }
             }
@@ -125,18 +128,23 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     &[("{n}", &number(ds.groups.len() as u64, lang))],
                 ));
                 ui.separator();
-                ui.strong(fill(
-                    tr(lang, Key::DupSavings),
-                    &[("{size}", &bytes(savings, lang))],
-                ));
+                ui.colored_label(
+                    Theme::of(ui).accent_text,
+                    fill(
+                        tr(lang, Key::DupSavings),
+                        &[("{size}", &bytes(savings, lang))],
+                    ),
+                );
             }
         });
     }
-    ui.separator();
+    ui.add_space(4.0);
+    let t = Theme::of(ui);
     let rows = &ds.rows;
     let groups = &ds.groups;
     let selected = state.selected;
     let actions = &mut state.actions;
+    let mut fx = TableFx::begin(ui, "jt_dup_table");
     TableBuilder::new(ui)
         .id_salt("jt_dup_table")
         .striped(true)
@@ -146,44 +154,56 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         .column(Column::initial(100.0))
         .column(Column::initial(100.0))
         .column(Column::remainder().at_least(200.0).clip(true))
-        .header(22.0, |mut h| {
+        .header(24.0, |mut h| {
             for k in [Key::ColSize, Key::ColSavings, Key::ColPath] {
                 h.col(|ui| {
-                    ui.strong(tr(lang, k));
+                    widgets::header_cell(ui, tr(lang, k), None);
                 });
             }
         })
         .body(|body| {
-            body.rows(20.0, rows.len(), |mut row| match rows[row.index()] {
+            body.rows(22.0, rows.len(), |mut row| match rows[row.index()] {
                 DupRow::Group(gi) => {
                     let g = &groups[gi];
+                    row.set_overline(gi > 0);
                     row.col(|ui| {
-                        ui.strong(bytes(g.size, lang));
+                        ui.add_space(6.0);
+                        cell(ui, bytes(g.size, lang), t.text_hi);
                     });
                     row.col(|ui| {
-                        ui.strong(bytes(g.savings(), lang));
+                        cell(ui, bytes(g.savings(), lang), t.accent_text);
                     });
                     row.col(|ui| {
-                        ui.strong(format!(
-                            "{} {} · {} {}",
-                            tr(lang, Key::ColGroup),
-                            gi + 1,
-                            g.files.len(),
-                            tr(lang, Key::ColFiles)
-                        ));
+                        cell(
+                            ui,
+                            format!(
+                                "{} {} · {} {}",
+                                tr(lang, Key::ColGroup),
+                                gi + 1,
+                                g.files.len(),
+                                tr(lang, Key::ColFiles)
+                            ),
+                            t.dim,
+                        );
                     });
                 }
                 DupRow::File(_, id) => {
-                    row.set_selected(selected == Some(id));
-                    row.col(|_| {});
+                    let is_sel = selected == Some(id);
+                    row.set_selected(is_sel);
+                    row.col(|ui| fx.mark(ui, u64::from(id), is_sel));
                     row.col(|_| {});
                     row.col(|ui| {
-                        ui.label(tree.full_path(id));
+                        cell(
+                            ui,
+                            tree.full_path(id),
+                            if is_sel { t.sel_text } else { t.text },
+                        );
                     });
                     row_interaction(&row.response(), lang, &tree, id, actions, allow_delete);
                 }
             });
         });
+    fx.end(ui);
 }
 
 #[cfg(test)]

@@ -1,13 +1,15 @@
 // Joschys_Tree – Treemap (Squarified-Layout und Zeichnen) – @ Joschy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind, Ui, pos2};
+use eframe::egui::{self, Align2, Rect, Sense, Stroke, StrokeKind, Ui, pos2};
 use jt_core::format::bytes;
 use jt_core::{Key, NO_NODE, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, fill};
-use crate::theme;
-use crate::views::no_tree;
+use crate::icons;
+use crate::theme::{self, FileCat, Theme, readable_on, with_alpha};
+use crate::views::{cell, no_tree};
+use crate::widgets;
 
 /// Kacheln unter dieser Kantenlänge werden nicht weiter unterteilt.
 const MIN_SPLIT: f32 = 12.0;
@@ -170,60 +172,77 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     if tm.root as usize >= tree.nodes.len() {
         tm.root = 0;
     }
+    let th = Theme::of(ui);
     ui.horizontal(|ui| {
         let parent = tree.node(tm.root).parent;
-        if ui
-            .add_enabled(
-                parent != NO_NODE,
-                egui::Button::new(tr(lang, Key::TreemapZoomOut)),
-            )
-            .clicked()
-        {
+        if widgets::tool_button(ui, tr(lang, Key::TreemapZoomOut), parent != NO_NODE).clicked() {
             tm.root = parent;
         }
-        ui.label(tree.full_path(tm.root));
-        ui.label(bytes(tree.node(tm.root).size, lang));
+        cell(ui, tree.full_path(tm.root), th.text);
+        cell(ui, bytes(tree.node(tm.root).size, lang), th.accent_text);
     });
+    ui.add_space(2.0);
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click());
-    let rect = resp.rect;
+    let outer = resp.rect;
+    painter.rect_filled(outer, 0.0, th.panel);
+    let rect = outer.shrink(3.0);
     if tm.built_for != Some((state.tree_gen, tm.root, rect)) {
         tm.rebuild(&tree, rect, state.tree_gen);
     }
-    let dark = ui.visuals().dark_mode;
     if tm.tiles.is_empty() {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
             tr(lang, Key::TreemapEmpty),
-            FontId::proportional(14.0),
-            ui.visuals().weak_text_color(),
+            widgets::title_font(15.0),
+            th.text2,
         );
         return;
     }
-    let border = if dark {
-        Color32::from_black_alpha(160)
-    } else {
-        Color32::from_white_alpha(200)
-    };
-    let text_col = if dark { Color32::WHITE } else { Color32::BLACK };
+    let font = widgets::mono(11.0);
     for t in &tm.tiles {
         let n = tree.node(t.id);
-        let fill = if n.is_dir() {
-            theme::dir_color(dark)
+        if n.is_dir() {
+            // Ordner: nur Kontur und Kopfzeile, damit die Dateien dominieren.
+            painter.rect_stroke(t.rect, 0.0, Stroke::new(1.0, th.line), StrokeKind::Inside);
+            if t.rect.width() > 40.0 && t.rect.height() > HEADER {
+                painter.with_clip_rect(t.rect.shrink(1.0)).text(
+                    t.rect.min + egui::vec2(4.0, 1.0),
+                    Align2::LEFT_TOP,
+                    &n.name,
+                    font.clone(),
+                    th.text2,
+                );
+            }
         } else {
-            theme::color_for_ext(tree.ext_of(t.id))
-        };
-        painter.rect_filled(t.rect, 0.0, fill);
-        painter.rect_stroke(t.rect, 0.0, Stroke::new(0.5, border), StrokeKind::Inside);
-        if n.is_dir() && t.rect.width() > 40.0 && t.rect.height() > HEADER {
-            painter.with_clip_rect(t.rect).text(
-                t.rect.min + egui::vec2(3.0, 1.0),
-                Align2::LEFT_TOP,
-                &n.name,
-                FontId::proportional(10.0),
-                text_col,
-            );
+            let cat = FileCat::from_ext(tree.ext_of(t.id));
+            let fill = cat.tile(th);
+            painter.rect_filled(t.rect, 0.0, fill);
+            if t.rect.width() >= 3.0 && t.rect.height() >= 3.0 {
+                let edge = if th.dark {
+                    with_alpha(cat.color(), 170)
+                } else {
+                    with_alpha(th.panel, 200)
+                };
+                painter.rect_stroke(t.rect, 0.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+            }
+            if t.rect.width() > 60.0 && t.rect.height() > 18.0 {
+                painter.with_clip_rect(t.rect.shrink(2.0)).text(
+                    t.rect.min + egui::vec2(4.0, 3.0),
+                    Align2::LEFT_TOP,
+                    &n.name,
+                    font.clone(),
+                    readable_on(fill),
+                );
+            }
         }
+    }
+    let hovered_tile = resp.hover_pos().and_then(|p| deepest_at(&tm.tiles, p));
+    if let Some(t) = hovered_tile {
+        if th.glow && theme::effects(ui) {
+            widgets::glow(&painter, t.rect, th.accent, 1.0);
+        }
+        painter.rect_stroke(t.rect, 0.0, Stroke::new(2.0, th.accent), StrokeKind::Inside);
     }
     // Hervorhebung der Auswahl
     if let Some(sel) = state.selected
@@ -232,13 +251,18 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         painter.rect_stroke(
             t.rect,
             0.0,
-            Stroke::new(2.0, Color32::YELLOW),
+            Stroke::new(2.0, th.text_hi),
             StrokeKind::Inside,
         );
+        icons::paint_corner_brackets(
+            &painter,
+            t.rect.expand(1.0),
+            8.0,
+            Stroke::new(2.0, th.accent),
+        );
     }
-    let hovered = resp
-        .hover_pos()
-        .and_then(|p| deepest_at(&tm.tiles, p).map(|t| t.id));
+    icons::paint_corner_brackets(&painter, outer, 14.0, Stroke::new(2.0, th.accent));
+    let hovered = hovered_tile.map(|t| t.id);
     if let Some(id) = hovered {
         let n = tree.node(id);
         let tip = fill(
@@ -319,7 +343,7 @@ mod tests {
                 assert!(overlap(a, b) < 0.01, "Überlappung {a:?} {b:?}");
             }
         }
-        // Flächen proportional zur Größe (±1 %)
+        // Flächen proportional zur Größe (+-1 %)
         let sum: u64 = items.iter().map(|(_, s)| s).sum();
         for (id, r) in &out {
             let s = items.iter().find(|(i, _)| i == id).unwrap().1;

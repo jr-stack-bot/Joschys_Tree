@@ -1,12 +1,15 @@
 // Joschys_Tree – Detailpanel: Owner, ACL, ADS, Zeiten – @ Joschy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use eframe::egui::{self, Ui};
+use eframe::egui::{self, Align2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use jt_core::format::{bytes, number};
 use jt_core::{Key, Lang, NodeFlags, NodeId, tr};
 
 use crate::app::{Action, AppState, DetailInfo};
-use crate::views::{fmt_percent, fmt_time, frac_of_parent};
+use crate::icons::{self, NodeIcon};
+use crate::theme::{self, FileCat, Theme, with_alpha};
+use crate::views::{cell, fmt_percent, fmt_time, frac_of_parent};
+use crate::widgets;
 
 #[derive(Default)]
 pub struct DetailsState {
@@ -29,8 +32,48 @@ const ATTRS: [(NodeFlags, Key); 9] = [
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     let lang = state.lang();
-    ui.heading(tr(lang, Key::DetTitle));
-    ui.separator();
+    let t = Theme::of(ui);
+    let fx = theme::effects(ui);
+    // Kopf: dezenter Verlauf, Scanlines, Eck-Klammern.
+    let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    {
+        let p = ui.painter();
+        let mut m = egui::Mesh::default();
+        let i = 0;
+        m.colored_vertex(head.left_top(), t.core_hi);
+        m.colored_vertex(head.right_top(), t.core_hi);
+        m.colored_vertex(head.right_bottom(), t.core_lo);
+        m.colored_vertex(head.left_bottom(), t.core_lo);
+        m.add_triangle(i, i + 1, i + 2);
+        m.add_triangle(i, i + 2, i + 3);
+        p.add(egui::Shape::mesh(m));
+        if fx {
+            widgets::scanlines(p, head, t);
+        }
+        icons::paint_corner_brackets(p, head, 10.0, Stroke::new(2.0, t.accent));
+        let wedge = Rect::from_min_size(
+            pos2(head.left() + 8.0, head.center().y - 5.0),
+            vec2(10.0, 10.0),
+        );
+        p.add(egui::Shape::convex_polygon(
+            icons::corner_wedge(wedge).to_vec(),
+            t.accent,
+            Stroke::NONE,
+        ));
+        p.text(
+            pos2(wedge.right() + 8.0, head.center().y),
+            Align2::LEFT_CENTER,
+            widgets::upper(tr(lang, Key::DetTitle)),
+            widgets::mono(12.0),
+            t.accent_text,
+        );
+        p.hline(
+            (head.right() - 26.0)..=(head.right() - 8.0),
+            head.center().y,
+            Stroke::new(3.0, t.red),
+        );
+    }
+    ui.add_space(6.0);
     let (Some(tree), Some(id)) = (state.tree.clone(), state.selected) else {
         return;
     };
@@ -41,16 +84,51 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     egui::ScrollArea::vertical()
         .id_salt("jt_details_scroll")
         .show(ui, |ui| {
-            ui.strong(&*n.name);
-            ui.small(tree.full_path(id));
-            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                let r = Rect::from_center_size(r.center(), vec2(16.0, 15.0));
+                if n.is_dir() {
+                    icons::paint_node_icon(
+                        ui.painter(),
+                        r,
+                        NodeIcon::Folder,
+                        t.accent,
+                        with_alpha(t.accent, 60),
+                        None,
+                        None,
+                    );
+                } else {
+                    let c = FileCat::from_ext(tree.ext_of(id)).color();
+                    icons::paint_node_icon(ui.painter(), r, NodeIcon::File, c, c, None, None);
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&*n.name)
+                            .font(widgets::title_font(16.0))
+                            .color(t.text_hi),
+                    )
+                    .wrap(),
+                );
+            });
+            cell(ui, tree.full_path(id), t.text2);
+            // Große Zahl mit Farbsaum.
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
+            widgets::fringe_text(
+                ui.painter(),
+                pos2(r.left(), r.center().y),
+                Align2::LEFT_CENTER,
+                &bytes(n.size, lang),
+                widgets::title_font(26.0),
+                t,
+            );
+            widgets::section(ui, tr(lang, Key::DetTitle), t.accent);
             egui::Grid::new("jt_details_grid")
                 .num_columns(2)
                 .striped(true)
                 .show(ui, |ui| {
                     let mut row = |k: Key, v: String| {
-                        ui.label(tr(lang, k));
-                        ui.label(v);
+                        cell(ui, tr(lang, k), t.text2);
+                        cell(ui, v, t.text);
                         ui.end_row();
                     };
                     row(
@@ -90,8 +168,16 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                         row(Key::ColAttributes, attrs.join(", "));
                     }
                 });
-            ui.small(tr(lang, Key::DetAccessNote));
-            ui.separator();
+            ui.add_space(2.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(tr(lang, Key::DetAccessNote))
+                        .small()
+                        .color(t.dim),
+                )
+                .wrap(),
+            );
+            ui.add_space(6.0);
             lazy_part(ui, lang, state, id);
         });
 }
@@ -107,29 +193,30 @@ fn lazy_part(ui: &mut Ui, lang: Lang, state: &mut AppState, id: NodeId) {
     match loaded {
         None => {
             if state.details.loading == Some(id) {
-                ui.spinner();
-            } else if ui
-                .add_enabled(
-                    state.details.loading.is_none(),
-                    egui::Button::new(format!(
-                        "{}: {} / {}",
-                        tr(lang, Key::DetLoad),
-                        tr(lang, Key::DetPermissions),
-                        tr(lang, Key::DetStreams)
-                    )),
-                )
-                .clicked()
+                widgets::busy(ui);
+            } else if widgets::tool_button(
+                ui,
+                &format!(
+                    "{}: {} / {}",
+                    tr(lang, Key::DetLoad),
+                    tr(lang, Key::DetPermissions),
+                    tr(lang, Key::DetStreams)
+                ),
+                state.details.loading.is_none(),
+            )
+            .clicked()
             {
                 state.actions.push(Action::LoadDetails(id));
             }
         }
         Some(info) => {
-            ui.strong(tr(lang, Key::DetOwner));
+            let t = Theme::of(ui);
+            widgets::section(ui, tr(lang, Key::DetOwner), t.accent);
             match &info.security {
                 Ok(sec) => {
                     ui.label(&sec.owner);
                     ui.add_space(4.0);
-                    ui.strong(tr(lang, Key::DetPermissions));
+                    widgets::section(ui, tr(lang, Key::DetPermissions), t.warn);
                     egui::Grid::new("jt_acl_grid").striped(true).show(ui, |ui| {
                         ui.small(tr(lang, Key::DetPrincipal));
                         ui.small(tr(lang, Key::ColType));
@@ -150,7 +237,7 @@ fn lazy_part(ui: &mut Ui, lang: Lang, state: &mut AppState, id: NodeId) {
                 }
             }
             ui.add_space(6.0);
-            ui.strong(tr(lang, Key::DetStreams));
+            widgets::section(ui, tr(lang, Key::DetStreams), t.ok);
             match &info.streams {
                 Ok(s) if s.is_empty() => {
                     ui.label(tr(lang, Key::DetNoStreams));

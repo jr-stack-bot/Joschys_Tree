@@ -7,7 +7,9 @@ use jt_core::format::bytes;
 use jt_core::{Key, NodeId, tr};
 
 use crate::app::AppState;
-use crate::views::{fmt_time, no_tree, row_interaction};
+use crate::theme::Theme;
+use crate::views::{cell, fmt_time, no_tree, row_interaction};
+use crate::widgets::{self, TableFx};
 
 /// Zwischenspeicher der Top-100 (wird nur bei Baumänderung neu berechnet).
 #[derive(Default)]
@@ -27,10 +29,12 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         state.top.ids = jt_core::stats::top_files(&tree, 100, None);
         state.top.gen_ = state.tree_gen;
     }
-    ui.heading(tr(lang, Key::TopTitle));
+    let t = Theme::of(ui);
+    widgets::section(ui, tr(lang, Key::TopTitle), t.accent);
     let ids = &state.top.ids;
     let selected = state.selected;
     let actions = &mut state.actions;
+    let mut fx = TableFx::begin(ui, "jt_top_table");
     TableBuilder::new(ui)
         .id_salt("jt_top_table")
         .striped(true)
@@ -42,7 +46,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         .column(Column::initial(90.0))
         .column(Column::initial(130.0))
         .column(Column::remainder().at_least(200.0).clip(true))
-        .header(22.0, |mut h| {
+        .header(24.0, |mut h| {
             for k in [
                 Key::ColRank,
                 Key::ColSize,
@@ -51,32 +55,41 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 Key::ColPath,
             ] {
                 h.col(|ui| {
-                    ui.strong(tr(lang, k));
+                    widgets::header_cell(ui, tr(lang, k), None);
                 });
             }
         })
         .body(|body| {
-            body.rows(20.0, ids.len(), |mut row| {
+            body.rows(22.0, ids.len(), |mut row| {
                 let i = row.index();
                 let id = ids[i];
                 let n = tree.node(id);
-                row.set_selected(selected == Some(id));
+                let is_sel = selected == Some(id);
+                row.set_selected(is_sel);
+                let (main, weak) = if is_sel {
+                    (t.sel_text, t.sel_text)
+                } else {
+                    (t.text, t.text2)
+                };
                 row.col(|ui| {
-                    ui.label((i + 1).to_string());
+                    fx.mark(ui, u64::from(id), is_sel);
+                    ui.add_space(6.0);
+                    cell(ui, (i + 1).to_string(), t.dim);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(n.size, lang));
+                    cell(ui, bytes(n.size, lang), main);
                 });
                 row.col(|ui| {
-                    ui.label(bytes(n.allocated, lang));
+                    cell(ui, bytes(n.allocated, lang), weak);
                 });
                 row.col(|ui| {
-                    ui.label(fmt_time(n.modified, lang));
+                    cell(ui, fmt_time(n.modified, lang), weak);
                 });
                 row.col(|ui| {
-                    ui.label(tree.full_path(id));
+                    cell(ui, tree.full_path(id), main);
                 });
                 row_interaction(&row.response(), lang, &tree, id, actions, allow_delete);
             });
         });
+    fx.end(ui);
 }

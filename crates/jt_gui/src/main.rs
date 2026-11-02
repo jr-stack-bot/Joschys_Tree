@@ -5,11 +5,15 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+#[cfg(debug_assertions)]
+mod debug_hook;
 mod dialogs;
 mod footer;
+mod icons;
 mod settings;
 mod theme;
 mod views;
+mod widgets;
 
 /// Fenstertitel; zur Laufzeit wird " – <Ziel>" angehängt.
 pub const WINDOW_TITLE: &str = "Joschys_Tree @ Joschy";

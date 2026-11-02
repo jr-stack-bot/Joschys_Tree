@@ -1,11 +1,12 @@
 // Joschys_Tree – Ansichten der Tabs und gemeinsame Helfer – @ Joschy
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use eframe::egui::{self, Align2, FontId, Sense, Ui, vec2};
+use eframe::egui::{self, Ui};
 use jt_core::{FileTime, Key, Lang, NO_NODE, Node, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, Tab};
-use crate::theme;
+use crate::theme::Theme;
+use crate::widgets;
 
 pub mod delta;
 pub mod details;
@@ -29,21 +30,29 @@ const TABS: [(Tab, Key); 7] = [
 /// Tab-Leiste und aktiver Tab.
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     let lang = state.lang();
+    ui.add_space(2.0);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
         for (tab, key) in TABS {
-            ui.selectable_value(&mut state.tab, tab, tr(lang, key));
+            if widgets::tab_button(ui, state.tab == tab, tr(lang, key)).clicked() {
+                state.tab = tab;
+            }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let enabled = state.tree.is_some() && !state.file_dialog_busy();
-            if ui
-                .add_enabled(enabled, egui::Button::new(tr(lang, Key::MenuExport)))
-                .clicked()
-            {
+            if widgets::tool_button(ui, tr(lang, Key::MenuExport), enabled).clicked() {
                 state.actions.push(Action::OpenExport);
             }
         });
     });
-    ui.separator();
+    let t = Theme::of(ui);
+    let (r, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
+    ui.painter().hline(
+        r.x_range(),
+        r.center().y.round() + 0.5,
+        egui::Stroke::new(1.0, t.line),
+    );
     match state.tab {
         Tab::Tree => tree_view::show(ui, state),
         Tab::Treemap => treemap::show(ui, state),
@@ -57,9 +66,14 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
 
 /// Hinweis, solange kein Scan geladen ist.
 pub fn no_tree(ui: &mut Ui, lang: Lang) {
-    ui.add_space(24.0);
+    ui.add_space(40.0);
     ui.vertical_centered(|ui| {
-        ui.heading(tr(lang, Key::NoScanYet));
+        let t = Theme::of(ui);
+        ui.label(
+            egui::RichText::new(tr(lang, Key::NoScanYet))
+                .font(widgets::title_font(18.0))
+                .color(t.text2),
+        );
     });
 }
 
@@ -117,25 +131,9 @@ pub fn age_days(n: &Node, now: FileTime) -> Option<i64> {
     Some(((now.to_unix_secs() - n.modified.to_unix_secs()) / 86_400).max(0))
 }
 
-/// Prozent-Balken mit Text in einer Tabellenzelle.
-pub fn percent_bar(ui: &mut Ui, frac: f32, lang: Lang) {
-    let frac = frac.clamp(0.0, 1.0);
-    let h = ui.available_height().clamp(10.0, 16.0);
-    let w = ui.available_width().max(20.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-    let vis = ui.visuals();
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, vis.extreme_bg_color);
-    let mut fill = rect;
-    fill.set_width(rect.width() * frac);
-    painter.rect_filled(fill, 2.0, theme::bar_color(vis.dark_mode));
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        fmt_percent(frac, lang),
-        FontId::proportional(11.0),
-        vis.text_color(),
-    );
+/// Tabellenzelle mit fester Textfarbe.
+pub fn cell(ui: &mut Ui, text: impl Into<String>, color: egui::Color32) -> egui::Response {
+    ui.add(egui::Label::new(egui::RichText::new(text).color(color)).selectable(false))
 }
 
 /// Rechtsklick-Menü für einen Knoten. Löschpunkte nur, wenn `allow_delete`
