@@ -70,14 +70,19 @@ pub fn protect_env() -> &'static ProtectEnv {
     ENV.get_or_init(ProtectEnv::from_system)
 }
 
-/// Attribute und Ordner-Eigenschaft eines Pfads, soweit lesbar (sonst leer/Datei).
+/// Attribute und Ordner-Eigenschaft eines Pfads, soweit lesbar (fehlt der Pfad:
+/// leer/Datei; sonst unlesbar: HIDDEN).
 /// SYSTEM/HIDDEN werden (unter Windows) von den Elternordnern geerbt, soweit deren
 /// Attribute lesbar sind; die Laufwerks-/Freigabe-Wurzel zählt nicht (sie trägt
 /// unter Windows selbst HIDDEN|SYSTEM).
 fn path_facts(path: &str) -> (NodeFlags, bool) {
     let lp = long_path(path);
-    let Ok(md) = std::fs::symlink_metadata(&lp) else {
-        return (NodeFlags::empty(), false);
+    let md = match std::fs::symlink_metadata(&lp) {
+        Ok(md) => md,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return (NodeFlags::empty(), false),
+        // Attribute unlesbar (z. B. Zugriff verweigert): konservativ wie versteckt
+        // behandeln (mindestens Vorsicht); gesperrt wird weiter nach dem Pfadtext.
+        Err(_) => return (NodeFlags::HIDDEN, false),
     };
     let mut flags = NodeFlags::empty();
     #[cfg(windows)]
@@ -581,6 +586,25 @@ mod guard_tests {
         let e = one(r"D:\Daten\x", &|_: &str| Resolved::Unresolvable).expect_err("unres");
         assert_eq!(reason_of(&e), Reason::Unresolvable);
         assert!(one(r"D:\Daten\x", &|_: &str| Resolved::Gone).is_ok());
+    }
+
+    #[test]
+    fn path_facts_missing_and_unreadable() {
+        assert_eq!(
+            path_facts("/gibt/es/nicht/joschy_x"),
+            (NodeFlags::empty(), false)
+        );
+        // Ein Pfad "unter" einer Datei liefert NotADirectory (kein NotFound) → vorsichtig.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("datei");
+        std::fs::write(&f, b"x").expect("write");
+        let below = f.join("kind").to_string_lossy().into_owned();
+        if std::fs::symlink_metadata(&below)
+            .err()
+            .is_some_and(|e| e.kind() != io::ErrorKind::NotFound)
+        {
+            assert_eq!(path_facts(&below), (NodeFlags::HIDDEN, false));
+        }
     }
 
     #[test]

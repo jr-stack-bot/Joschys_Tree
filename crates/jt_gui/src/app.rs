@@ -589,7 +589,10 @@ impl JtApp {
         st.basket.retain(|id| is_attached(tree, id));
         st.tree_gen += 1;
         st.basket.rebind(st.tree_gen);
+        // Gleicher Scan: die echte Wurzel über die neue Generation retten.
+        let real = st.prot.real_root().cloned();
         st.prot.sync(st.tree_gen);
+        st.prot.set_real_root(real);
         // Aufräum-Ergebnis ist veraltet; wird beim nächsten Öffnen neu berechnet.
         st.cleanup = Default::default();
         st.tree_view.invalidate();
@@ -1717,6 +1720,35 @@ mod tests {
         assert!(st.prot.real_root().is_some());
         st.set_tree(sample_tree(), true);
         assert!(st.prot.real_root().is_none());
+    }
+
+    #[test]
+    fn real_root_survives_removal() {
+        use jt_core::model::{EntryInfo, ScanMeta, ScanMode, TreeBuilder};
+        let mut b = TreeBuilder::new(ScanMeta::new("X:\\", ScanMode::Walk), "X:\\");
+        let d = EntryInfo::default();
+        let win = b.add_dir(0, "Windows", d.clone());
+        let sys = b.add_dir(win, "System32", d.clone());
+        let data = b.add_dir(0, "Daten", d.clone());
+        let f = b.add_file(data, "a.txt", d);
+        let mut st = AppState::new(Settings::default());
+        st.set_tree(b.finish(), true);
+        let subst = crate::safety::RealRoot::resolve("X:\\", |_| Ok(r"\\?\C:\".into()));
+        st.prot.set_real_root(Some(subst.clone()));
+        let t = st.tree.clone().unwrap();
+        assert!(matches!(
+            st.prot.decision(&t, sys, true, true),
+            Decision::Denied(Deny::Protected(_))
+        ));
+        let before = st.tree_gen;
+        JtApp::apply_removal(&mut st, &[f]);
+        assert!(st.tree_gen > before);
+        assert_eq!(st.prot.real_root(), Some(&subst));
+        let t = st.tree.clone().unwrap();
+        assert!(matches!(
+            st.prot.decision(&t, sys, true, true),
+            Decision::Denied(Deny::Protected(_))
+        ));
     }
 
     #[test]

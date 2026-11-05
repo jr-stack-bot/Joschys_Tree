@@ -14,14 +14,17 @@
 //! geschützte Elemente (hiberfil.sys, pagefile.sys, Windows.old, $Recycle.Bin);
 //! die GUI bietet dort kein Löschen an, sondern einen Hinweis.
 //!
-//! Backups und Archive werden nie automatisch vorgeschlagen: `.bak`/`.old`/`.log`
-//! zählen nicht als Temp-Dateien, `.zip`/`.7z`/`.rar` nicht als Installer, und große
+//! Backups und Archive werden nie automatisch empfohlen: `.bak`/`.old`/`.log`
+//! zählen nicht als Temp-Dateien, `.zip`/`.7z`/`.rar` nicht als Installer (sie können
+//! nur in den nicht empfohlenen Gruppen OldDownloads/LargeOldFiles auftauchen), und große
 //! alte Dateien schließen VM-Abbilder, Postfächer, Datenbanken, Passwort-Tresore,
 //! Systemabbilder und Backups (`vhdx`, `pst`, `mdf`, `kdbx`, `wim`, `vbk`, `bak` …)
 //! sowie `steamapps`- und `DockerDesktop`-Ordner aus. Elemente mit OFFLINE-Attribut
 //! (OneDrive "nur online") werden in keiner Gruppe vorgeschlagen: Löschen würde
 //! auch in der Cloud löschen. "Alle empfohlenen" ([`CleanupKind::is_recommended`])
-//! umfasst nur UserTemp, BrowserCache, CrashDumps und EmptyFolders.
+//! umfasst nur UserTemp, BrowserCache, CrashDumps und EmptyFolders. CrashDumps sind
+//! nur Einträge in `<Profil>\AppData\Local\CrashDumps`; `.dmp` anderswo zählen nur
+//! als (nicht empfohlene) TempLikeFiles ab 10 MiB.
 
 use std::ops::ControlFlow;
 
@@ -286,9 +289,6 @@ fn kind_for(
             return Some(CleanupKind::CrashDumps);
         }
     }
-    if !is_dir && ext == "dmp" {
-        return Some(CleanupKind::CrashDumps);
-    }
     if !is_dir
         && let Some(r) = rel.as_deref()
         && r.len() >= 2
@@ -542,13 +542,21 @@ mod tests {
         let d1 = b.file(cd, "app.exe.123.dmp", 1000, 0);
         let bk = b.dir(0, "Backup");
         let d2 = b.file(bk, "x.dmp", 10, 0);
+        let daten = b.path(r"D_Daten\Analyse");
+        let big = b.file(daten, "analyse.dmp", 5 << 30, 0);
         let win = b.dir(0, "Windows");
         let d3 = b.file(win, "MEMORY.DMP", 10_000, 0);
+        let mini = b.path(r"Windows\Minidump");
+        let d4 = b.file(mini, "110526-01.dmp", 50 * MIB, 0);
         let t = b.b.finish();
         let gs = run(&t);
         let n = nodes(&gs, CleanupKind::CrashDumps);
-        assert!(n.contains(&d1) && n.contains(&d2));
-        assert!(!n.contains(&d3));
+        assert_eq!(n, vec![d1]);
+        assert!(!n.contains(&d2) && !n.contains(&d3) && !n.contains(&d4));
+        // .dmp anderswo: nur große als (nicht empfohlene) Temp-Datei
+        let tl = nodes(&gs, CleanupKind::TempLikeFiles);
+        assert_eq!(tl, vec![big]);
+        assert!(!CleanupKind::TempLikeFiles.is_recommended());
     }
 
     #[test]

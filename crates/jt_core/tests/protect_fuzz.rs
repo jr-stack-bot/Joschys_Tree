@@ -6,7 +6,8 @@ use jt_core::platform::{Resolved, guard_paths_with};
 use jt_core::protect::{ProtectEnv, ProtectError, Reason, classify_path};
 
 /// Zusammengesetzte Schreibweisen geschützter Pfade müssen immer Blocked sein
-/// (verkleinerte Variante des Prüfer-Fuzz mit 224k Kombinationen).
+/// (verkleinerte Variante des Prüfer-Fuzz mit 224k Kombinationen, 30.000 Pfade;
+/// Freigaben namens C wie `\\pc\C` gelten wie das Systemlaufwerk).
 #[test]
 fn fuzz_protected_paths_always_blocked() {
     let env = ProtectEnv::windows_default();
@@ -20,6 +21,9 @@ fn fuzz_protected_paths_always_blocked() {
         r"\\localhost\C$",
         "C:/",
         r"\\?\UNC\pc\c$",
+        r"\\pc\C",
+        r"\\localhost\C",
+        r"\\?\UNC\pc\C",
     ];
     let prot: [&[&str]; 17] = [
         &["Windows"],
@@ -87,7 +91,7 @@ fn fuzz_protected_paths_always_blocked() {
     };
     let mut bad = Vec::new();
     let mut n = 0;
-    while n < 5000 {
+    while n < 30_000 {
         let r = roots[rnd(roots.len() as u64) as usize];
         let pv = prot[rnd(prot.len() as u64) as usize];
         let mut s = r.to_string();

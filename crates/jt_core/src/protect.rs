@@ -23,9 +23,11 @@
 //!   (`ShortName`, Muster `^[^\\]{1,8}~\d+(\.[^\\]{0,3})?$`, case-insensitiv). Das sperrt
 //!   bewusst konservativ auch harmlose Namen wie `ABC~1.tmp`: ein Kurzname kann auf jeden
 //!   geschützten Ordner zeigen, und der Text allein verrät nicht, auf welchen.
-//! * `Windows`, `Program Files*`, `ProgramData` direkt in der Wurzel einer Netzfreigabe
-//!   (`\\pc\C\Windows`) samt Inhalt (`AliasedSystem`): die Freigabe kann das
-//!   Systemlaufwerk eines Rechners sein.
+//! * Auf Netzfreigaben (`\\pc\C\…`) alles, was auf dem Systemlaufwerk gesperrt wäre
+//!   (Windows, Programme, Profile, `NTUSER.DAT`, `pagefile.sys`, `Recovery` …), sowie
+//!   `Windows`, `Program Files*`, `ProgramData` in der Freigabe-Wurzel samt Inhalt
+//!   (`AliasedSystem`): die Freigabe kann das Systemlaufwerk eines Rechners sein.
+//!   Bewusst konservativ: auch ein NAS-Ordner `\\nas\daten\Users\x` ist gesperrt.
 //! * Pfade, deren echter Ort sich nicht ermitteln lässt, obwohl das Ziel existiert
 //!   (`Unresolvable`, nur im Löschweg).
 //! * `%SystemRoot%` samt allem darunter (Temp, WinSxS, System32 …) (`WindowsDir`).
@@ -582,6 +584,8 @@ pub(crate) fn eval(p: &NPath, flags: NodeFlags, is_dir: bool, env: &NormEnv) -> 
             return Blocked(Reason::ProgramDataMicrosoft);
         }
     }
+    // Vorsicht-Stufe, falls die Freigabe ein Systemlaufwerk wäre (siehe unten).
+    let mut share_caution = None;
     if p.is_drive() {
         if first.starts_with('$') {
             return if c.len() == 1 && !is_dir {
@@ -596,9 +600,23 @@ pub(crate) fn eval(p: &NPath, flags: NodeFlags, is_dir: bool, env: &NormEnv) -> 
         if c.len() == 1 && ROOT_SYSTEM_FILES.contains(&first.as_str()) {
             return Blocked(Reason::SystemFile);
         }
-    } else if FOREIGN_SYSTEM.contains(&first.as_str()) {
-        // \\pc\C\Windows: die Freigabe kann ein Systemlaufwerk sein.
-        return Blocked(Reason::AliasedSystem);
+    } else {
+        if FOREIGN_SYSTEM.contains(&first.as_str()) {
+            // \\pc\C\Windows: die Freigabe kann ein Systemlaufwerk sein.
+            return Blocked(Reason::AliasedSystem);
+        }
+        // Freigabe als Systemlaufwerk denken (\\pc\C = C:\): was dort gesperrt
+        // wäre, ist auch über die Freigabe gesperrt (Profile, NTUSER.DAT,
+        // pagefile.sys, Recovery …). Eigene exe und Attribute zählen hier nicht.
+        let alt = NPath {
+            root: env.sys_root.clone(),
+            comps: c.clone(),
+        };
+        match eval(&alt, NodeFlags::empty(), is_dir, env) {
+            Blocked(r) if r != Reason::OwnProgram => return Blocked(Reason::AliasedSystem),
+            Caution(r) => share_caution = Some(r),
+            _ => {}
+        }
     }
     if env.users.as_ref().is_some_and(|u| p.same(u)) {
         return Blocked(Reason::UsersDir);
@@ -658,6 +676,9 @@ pub(crate) fn eval(p: &NPath, flags: NodeFlags, is_dir: bool, env: &NormEnv) -> 
     }
     if flags.contains(NodeFlags::HIDDEN) && !c.iter().any(|x| x == "temp" || x == "tmp") {
         return Caution(Reason::Hidden);
+    }
+    if let Some(r) = share_caution {
+        return Caution(r);
     }
     Protection::Free
 }
@@ -1257,6 +1278,32 @@ mod tests {
         blocked(r"\\?\UNC\pc\C\Windows", Reason::AliasedSystem);
         free(r"\\pc\C\Daten\Windows");
         free(r"\\pc\C\Daten");
+        // Freigabe namens C wie ein Systemlaufwerk
+        for p in [
+            r"\\pc\C\Users\joschy",
+            r"\\pc\C\Users",
+            r"\\pc\C\Users\joschy\NTUSER.DAT",
+            r"\\pc\C\Users\joschy\AppData\Local\Microsoft\Windows",
+            r"\\pc\C\System Volume Information",
+            r"\\pc\C\$Recycle.Bin",
+            r"\\pc\C\pagefile.sys",
+            r"\\pc\C\hiberfil.sys",
+            r"\\pc\C\swapfile.sys",
+            r"\\pc\C\Recovery",
+            r"\\pc\C\Boot",
+            r"\\pc\C\EFI",
+            r"\\localhost\C\Users\joschy",
+        ] {
+            blocked(p, Reason::AliasedSystem);
+        }
+        // keine Falschsperren
+        free(r"\\nas\daten\x");
+        free(r"\\pc\daten\Fotos\a.jpg");
+        free(r"\\pc\d$\Daten");
+        free(r"\\pc\C\Tools");
+        caution(r"\\pc\d$\Windows", Reason::ForeignSystem);
+        caution(r"\\pc\C\Users\joschy\Documents\a.txt", Reason::UserLibrary);
+        blocked(r"\\pc\daten", Reason::VolumeRoot);
     }
 
     fn real(raw: &str, real: &str) -> Protection {

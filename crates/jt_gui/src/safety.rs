@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 use std::io;
 
-use jt_core::protect::{ProtectEnv, Protection, Reason, classify_real, contains_blocked_real};
+use jt_core::protect::{
+    ProtectEnv, Protection, Reason, classify, classify_real, contains_blocked_real, stricter,
+};
 use jt_core::{Key, Lang, NO_NODE, NodeId, Tree, tr};
 
 /// Warum ein Element nicht gelöscht werden darf.
@@ -121,6 +123,24 @@ fn effective(real: Option<&RealRoot>) -> Option<&str> {
     real.and_then(RealRoot::effective)
 }
 
+/// Schutzstufe eines Knotens mit echter Scan-Wurzel: Roh- und echter Pfad, die
+/// strengere Stufe gilt. Ist die Wurzel nicht auflösbar, ist alles gesperrt
+/// (`Unresolvable`), damit die GUI es schon vor dem Dialog so anzeigt wie der Löschweg.
+pub fn protection_with_root(
+    tree: &Tree,
+    id: NodeId,
+    real: Option<&RealRoot>,
+    env: &ProtectEnv,
+) -> Protection {
+    match real {
+        Some(r) if !r.resolved => stricter(
+            classify(tree, id, env),
+            Protection::Blocked(Reason::Unresolvable),
+        ),
+        _ => classify_real(tree, id, effective(real), env),
+    }
+}
+
 /// Darf `id` gelöscht werden? Nur als Admin, nur im Live-Scan, nur wenn der
 /// Löschschutz es erlaubt und (bei Ordnern) nichts Geschütztes darin liegt.
 /// Bewertet Roh-Pfad und echten Pfad unter `real` (die strengere Stufe gilt).
@@ -141,7 +161,7 @@ pub fn delete_decision(
     let n = tree.node(id);
     let rr = effective(real);
     decide(
-        classify_real(tree, id, rr, env),
+        protection_with_root(tree, id, real, env),
         id == tree.root(),
         n.is_dir(),
         || contains_blocked_real(tree, id, rr, env),
@@ -203,7 +223,7 @@ impl ProtCache {
             .flatten()
         {
             Some(&Protection::Blocked(r)) if r.is_inherited() => Protection::Blocked(r),
-            _ => classify_real(tree, id, effective(self.real.as_ref()), env()),
+            _ => protection_with_root(tree, id, self.real.as_ref(), env()),
         };
         self.prot.insert(id, p);
         p
@@ -445,11 +465,27 @@ pub mod tests {
             d(sys, Some(&other)),
             Decision::NeedsAck(Reason::ForeignSystem)
         );
-        // Auflösung fehlgeschlagen -> Roh-Pfad
+        // Auflösung fehlgeschlagen -> schon vor dem Dialog gesperrt (wie im Löschweg)
         let bad = RealRoot::resolve("X:\\", |_| Err(io::Error::other("x")));
         assert_eq!(
             d(sys, Some(&bad)),
-            Decision::NeedsAck(Reason::ForeignSystem)
+            Decision::Denied(Deny::Protected(Reason::Unresolvable))
+        );
+        assert_eq!(
+            d(txt, Some(&bad)),
+            Decision::Denied(Deny::Protected(Reason::Unresolvable))
+        );
+        assert_eq!(
+            protection_with_root(&t, txt, Some(&bad), &env),
+            Protection::Blocked(Reason::Unresolvable)
+        );
+        assert_eq!(protection_with_root(&t, txt, None, &env), Protection::Free);
+        let mut cb = ProtCache::default();
+        cb.sync(9);
+        cb.set_real_root(Some(bad.clone()));
+        assert_eq!(
+            cb.basket_decision(&t, txt),
+            Decision::Denied(Deny::Protected(Reason::Unresolvable))
         );
         // Cache: gleiche Entscheidungen, set_real_root verwirft gecachte Stufen.
         let mut c = ProtCache::default();
