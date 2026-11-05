@@ -37,14 +37,10 @@ pub struct CleanCard {
 }
 
 impl CleanCard {
-    /// Soll "Alle empfohlenen" diese Gruppe mitnehmen? Alte Downloads und große
-    /// alte Dateien wählt der Nutzer bewusst selbst.
+    /// Soll "Alle empfohlenen" diese Gruppe mitnehmen? Nur UserTemp, BrowserCache,
+    /// CrashDumps und EmptyFolders; alles andere wählt der Nutzer bewusst selbst.
     pub fn recommended(&self) -> bool {
-        !self.info_only
-            && !matches!(
-                self.kind,
-                CleanupKind::LargeOldFiles | CleanupKind::OldDownloads
-            )
+        !self.info_only && self.kind.is_recommended()
     }
 }
 
@@ -107,7 +103,7 @@ pub fn card_selection(card: &CleanCard, deselected: &HashSet<NodeId>) -> Vec<Nod
         .collect()
 }
 
-/// Alle empfohlenen Knoten (ohne Info-Gruppen, alte Downloads, große alte Dateien).
+/// Alle empfohlenen Knoten (nur UserTemp, BrowserCache, CrashDumps, EmptyFolders).
 pub fn recommended_nodes(cards: &[CleanCard], deselected: &HashSet<NodeId>) -> Vec<NodeId> {
     cards
         .iter()
@@ -449,7 +445,27 @@ mod tests {
         let all: u64 = cards.iter().map(|c| c.allocated).sum();
         assert_eq!(s, all - info);
         assert!(s > 0);
-        // Empfohlen: ohne Info, alte Downloads, große alte Dateien.
+        // Empfohlen: nur UserTemp, BrowserCache, CrashDumps, EmptyFolders.
+        for c in &cards {
+            assert_eq!(
+                c.recommended(),
+                matches!(
+                    c.kind,
+                    CleanupKind::UserTemp
+                        | CleanupKind::BrowserCache
+                        | CleanupKind::CrashDumps
+                        | CleanupKind::EmptyFolders
+                ),
+                "{:?}",
+                c.kind
+            );
+        }
+        assert!(
+            cards
+                .iter()
+                .any(|c| c.kind == CleanupKind::OldInstallers && !c.recommended()),
+            "Installer nie empfohlen"
+        );
         let none = HashSet::new();
         let rec = recommended_nodes(&cards, &none);
         let hib = t.find_path("C:\\hiberfil.sys").unwrap();

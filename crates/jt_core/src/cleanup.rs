@@ -13,6 +13,15 @@
 //! vorgeschlagen (Inhalt unbekannt). Info-Gruppen (`info_only`) zeigen auf
 //! geschützte Elemente (hiberfil.sys, pagefile.sys, Windows.old, $Recycle.Bin);
 //! die GUI bietet dort kein Löschen an, sondern einen Hinweis.
+//!
+//! Backups und Archive werden nie automatisch vorgeschlagen: `.bak`/`.old`/`.log`
+//! zählen nicht als Temp-Dateien, `.zip`/`.7z`/`.rar` nicht als Installer, und große
+//! alte Dateien schließen VM-Abbilder, Postfächer, Datenbanken, Passwort-Tresore,
+//! Systemabbilder und Backups (`vhdx`, `pst`, `mdf`, `kdbx`, `wim`, `vbk`, `bak` …)
+//! sowie `steamapps`- und `DockerDesktop`-Ordner aus. Elemente mit OFFLINE-Attribut
+//! (OneDrive "nur online") werden in keiner Gruppe vorgeschlagen: Löschen würde
+//! auch in der Cloud löschen. "Alle empfohlenen" ([`CleanupKind::is_recommended`])
+//! umfasst nur UserTemp, BrowserCache, CrashDumps und EmptyFolders.
 
 use std::ops::ControlFlow;
 
@@ -62,6 +71,19 @@ impl CleanupKind {
                 | CleanupKind::InfoPagefile
                 | CleanupKind::InfoWindowsOld
                 | CleanupKind::InfoRecycleBin
+        )
+    }
+
+    /// Nimmt "Alle empfohlenen in den Korb" diese Gruppe mit? Nur Gruppen, die
+    /// sicher keine Nutzerdaten enthalten; alles andere wählt der Nutzer bewusst
+    /// einzeln ("In den Korb legen").
+    pub fn is_recommended(self) -> bool {
+        matches!(
+            self,
+            CleanupKind::UserTemp
+                | CleanupKind::BrowserCache
+                | CleanupKind::CrashDumps
+                | CleanupKind::EmptyFolders
         )
     }
 
@@ -137,8 +159,18 @@ impl Default for CleanupOptions {
 
 const MIB: u64 = 1 << 20;
 const DAY_TICKS: i64 = 86_400 * 10_000_000;
-const INSTALLER_EXTS: &[&str] = &["iso", "img", "msi", "exe", "msix", "zip", "7z", "rar"];
-const TEMP_LIKE_EXTS: &[&str] = &["tmp", "log", "bak", "old", "chk", "dmp"];
+const INSTALLER_EXTS: &[&str] = &["iso", "img", "msi", "exe", "msix"];
+/// Nur eindeutig temporäre Endungen; `.log`/`.bak`/`.old` können in Programm- oder
+/// Datenbankordnern wichtig sein.
+const TEMP_LIKE_EXTS: &[&str] = &["tmp", "chk", "dmp"];
+/// Nie als "große alte Datei" vorschlagen: VM-Abbilder, Postfächer, Datenbanken,
+/// Passwort-Tresore, System- und Backup-Abbilder.
+const LARGE_NEVER_EXTS: &[&str] = &[
+    "vhd", "vhdx", "avhdx", "vmdk", "vdi", "qcow2", "pst", "ost", "mdf", "ldf", "edb", "kdbx",
+    "wim", "esd", "tib", "vbk", "mrimg", "bak",
+];
+/// Ordner, unter denen nie "große alte Dateien" vorgeschlagen werden.
+const LARGE_NEVER_DIRS: &[&str] = &["steamapps", "dockerdesktop"];
 const CACHE_DIRS: &[&str] = &["cache", "code cache", "gpucache"];
 
 /// `t` ist bekannt und älter als `days` Tage vor `now`.
@@ -181,6 +213,18 @@ fn truly_empty(tree: &Tree, id: NodeId) -> bool {
     true
 }
 
+/// Enthält der Teilbaum (inklusive `id`) ein Element mit OFFLINE-Attribut?
+fn contains_offline(tree: &Tree, id: NodeId) -> bool {
+    let mut st = vec![id];
+    while let Some(x) = st.pop() {
+        if tree.node(x).flags.contains(NodeFlags::OFFLINE) {
+            return true;
+        }
+        st.extend(tree.children(x));
+    }
+    false
+}
+
 fn rel_str(rel: &[String]) -> Vec<&str> {
     rel.iter().map(String::as_str).collect()
 }
@@ -216,7 +260,10 @@ fn kind_for(
     opts: &CleanupOptions,
 ) -> Option<CleanupKind> {
     let n = tree.node(id);
-    if prot.is_blocked() || n.flags.contains(NodeFlags::ACCESS_DENIED) {
+    if prot.is_blocked()
+        || n.flags
+            .intersects(NodeFlags::ACCESS_DENIED | NodeFlags::OFFLINE)
+    {
         return None;
     }
     let is_dir = n.is_dir();
@@ -257,12 +304,17 @@ fn kind_for(
             return Some(CleanupKind::OldDownloads);
         }
     }
-    if !is_dir && TEMP_LIKE_EXTS.contains(&ext) && n.size > 10 * MIB {
+    if !is_dir && prot == Protection::Free && TEMP_LIKE_EXTS.contains(&ext) && n.size > 10 * MIB {
         return Some(CleanupKind::TempLikeFiles);
     }
     if !is_dir
         && n.size >= opts.large_min_bytes
         && older_than(n.modified, now, opts.large_min_age_days)
+        && !LARGE_NEVER_EXTS.contains(&ext)
+        && !path
+            .comps
+            .iter()
+            .any(|c| LARGE_NEVER_DIRS.contains(&c.as_str()))
     {
         return Some(CleanupKind::LargeOldFiles);
     }
@@ -322,8 +374,11 @@ pub fn find_cleanup(
             });
         };
         let n = tree.node(id);
-        if !kind.is_info() && n.is_dir() && contains_blocked_norm(tree, id, &ne) {
-            // Ordner mit geschützten Nachkommen nicht als Ganzes vorschlagen.
+        if !kind.is_info()
+            && n.is_dir()
+            && (contains_blocked_norm(tree, id, &ne) || contains_offline(tree, id))
+        {
+            // Ordner mit geschützten oder "nur online"-Nachkommen nicht als Ganzes vorschlagen.
             return ControlFlow::Continue(Visit::Descend);
         }
         let g = &mut groups[idx(kind)];
@@ -530,32 +585,143 @@ mod tests {
     fn large_old_files() {
         let mut b = B::new();
         let bk = b.dir(0, "Backup");
-        let big_old = b.file(bk, "image.vhdx", 2 << 30, 400);
-        let big_new = b.file(bk, "neu.vhdx", 2 << 30, 10);
+        let big_old = b.file(bk, "film.mkv", 2 << 30, 400);
+        let big_new = b.file(bk, "neu.mkv", 2 << 30, 10);
         let small_old = b.file(bk, "klein.bin", 100 * MIB, 800);
         let pf = b.path(r"Program Files\Spiel");
         let big_pf = b.file(pf, "data.pak", 4 << 30, 900);
+        // nie vorschlagen: VM-Abbilder, Postfächer, Datenbanken, Backups, Spiele, Docker
+        let mut never = Vec::new();
+        for name in [
+            "image.vhdx",
+            "alt.VHD",
+            "snap.avhdx",
+            "vm.vmdk",
+            "vb.vdi",
+            "q.qcow2",
+            "mail.pst",
+            "cache.ost",
+            "db.mdf",
+            "db_log.ldf",
+            "priv.edb",
+            "tresor.kdbx",
+            "install.wim",
+            "install.esd",
+            "acronis.tib",
+            "veeam.vbk",
+            "macrium.mrimg",
+            "sql.bak",
+        ] {
+            never.push(b.file(bk, name, 2 << 30, 400));
+        }
+        let steam = b.path(r"Spiele\Steam\steamapps\common\X");
+        never.push(b.file(steam, "data.pak", 4 << 30, 900));
+        let docker = b.path(r"Users\joschy\AppData\Local\Docker\wsl\DockerDesktop");
+        never.push(b.file(docker, "disk.img", 4 << 30, 900));
+        let docker2 = b.path(r"VMs\DockerDesktop");
+        never.push(b.file(docker2, "data.raw", 4 << 30, 900));
+        // OneDrive "nur online": nie, in keiner Gruppe
+        let od = b.dir(0, "Archiv");
+        let offline = b.file_flags(od, "gross.mkv", 4 << 30, 900, NodeFlags::OFFLINE);
+        never.push(offline);
         let t = b.b.finish();
         let gs = run(&t);
         let n = nodes(&gs, CleanupKind::LargeOldFiles);
         assert_eq!(n, vec![big_old]);
         assert!(!n.contains(&big_new) && !n.contains(&small_old) && !n.contains(&big_pf));
+        let all: Vec<NodeId> = gs.iter().flat_map(|g| g.nodes.clone()).collect();
+        for id in never {
+            assert!(!all.contains(&id), "{}", t.full_path(id));
+        }
+    }
+
+    #[test]
+    fn offline_never_suggested() {
+        let mut b = B::new();
+        let temp = b.path(r"Users\joschy\AppData\Local\Temp");
+        let f = b.file_flags(temp, "a.tmp", 100, 30, NodeFlags::OFFLINE);
+        let sub = b.dir(temp, "sub");
+        let inner = b.file_flags(sub, "b", 5, 30, NodeFlags::OFFLINE);
+        b.file(sub, "c", 5, 30);
+        let ok = b.file(temp, "ok.tmp", 100, 30);
+        let cd = b.path(r"Users\joschy\AppData\Local\CrashDumps");
+        let d = b.file_flags(cd, "x.dmp", 1000, 0, NodeFlags::OFFLINE);
+        let dl = b.path(r"Users\joschy\Downloads");
+        let o = b.file_flags(dl, "alt.pdf", 1000, 400, NodeFlags::OFFLINE);
+        let t = b.b.finish();
+        let gs = run(&t);
+        let all: Vec<NodeId> = gs.iter().flat_map(|g| g.nodes.clone()).collect();
+        for id in [f, sub, inner, d, o] {
+            assert!(!all.contains(&id), "{}", t.full_path(id));
+        }
+        // Der Ordner wird nicht als Ganzes genommen, normale Dateien daneben schon.
+        assert!(nodes(&gs, CleanupKind::UserTemp).contains(&ok));
+    }
+
+    #[test]
+    fn recommended_groups() {
+        use CleanupKind as K;
+        let rec: Vec<K> = K::ALL.into_iter().filter(|k| k.is_recommended()).collect();
+        assert_eq!(
+            rec,
+            vec![K::UserTemp, K::BrowserCache, K::CrashDumps, K::EmptyFolders]
+        );
+        for k in [
+            K::TempLikeFiles,
+            K::OldInstallers,
+            K::OldDownloads,
+            K::LargeOldFiles,
+        ] {
+            assert!(!k.is_recommended());
+        }
+        assert!(
+            K::ALL
+                .iter()
+                .filter(|k| k.is_info())
+                .all(|k| !k.is_recommended())
+        );
     }
 
     #[test]
     fn temp_like_files() {
         let mut b = B::new();
         let bk = b.dir(0, "Daten");
-        let log = b.file(bk, "server.LOG", 20 * MIB, 0);
-        let small = b.file(bk, "klein.log", MIB, 0);
+        let tmp = b.file(bk, "server.TMP", 20 * MIB, 0);
+        let chk = b.file(bk, "FILE0000.CHK", 20 * MIB, 0);
+        let small = b.file(bk, "klein.tmp", MIB, 0);
         let other = b.file(bk, "film.mkv", 20 * MIB, 0);
+        // Backups, Logs und Archive werden nie als Temp-Dateien vorgeschlagen.
+        let backup = b.dir(0, "Backup");
+        let bak = b.file(backup, "sql.bak", 2 << 30, 0);
+        let old = b.file(backup, "config.old", 20 * MIB, 0);
+        let log = b.file(backup, "db.log", 20 * MIB, 0);
         let pd = b.path(r"ProgramData\Microsoft\Logs");
-        let blocked_log = b.file(pd, "big.log", 50 * MIB, 0);
+        let blocked_tmp = b.file(pd, "big.tmp", 50 * MIB, 0);
+        // Vorsicht-Bereiche (ProgramData-App, AppData, Bibliotheken) auch nicht
+        let pda = b.path(r"ProgramData\App");
+        let caution_tmp = b.file(pda, "c.tmp", 50 * MIB, 0);
+        let docs = b.path(r"Users\joschy\Documents");
+        let doc_tmp = b.file(docs, "d.tmp", 50 * MIB, 0);
         let t = b.b.finish();
         let gs = run(&t);
         let n = nodes(&gs, CleanupKind::TempLikeFiles);
-        assert_eq!(n, vec![log]);
-        assert!(!n.contains(&small) && !n.contains(&other) && !n.contains(&blocked_log));
+        assert_eq!(n, vec![tmp, chk]);
+        let all: Vec<NodeId> = gs.iter().flat_map(|g| g.nodes.clone()).collect();
+        for id in [
+            small,
+            other,
+            bak,
+            old,
+            log,
+            blocked_tmp,
+            caution_tmp,
+            doc_tmp,
+        ] {
+            assert!(!n.contains(&id), "{}", t.full_path(id));
+        }
+        // Das 2-GiB-SQL-Backup taucht höchstens als (nicht empfohlene) große alte Datei
+        // auf – hier ist es neu, also gar nicht.
+        assert!(!all.contains(&bak));
     }
 
     #[test]
@@ -635,7 +801,7 @@ mod tests {
         b.file_flags(tsub, "lock.dat", 1, 100, NodeFlags::SYSTEM);
         let hive = b.path(r"Users\joschy");
         b.file(hive, "NTUSER.DAT", 50 * MIB, 900);
-        b.file(0, "bootmgr.log", 20 * MIB, 1); // frei, darf vorkommen
+        b.file(0, "bootmgr.tmp", 20 * MIB, 1); // frei, darf vorkommen
         let t = b.b.finish();
         let gs = run(&t);
         let e = env();

@@ -58,7 +58,9 @@ use stub::{
 // ---------------------------------------------------------------------------
 
 use crate::model::NodeFlags;
-use crate::protect::{NormEnv, ProtectEnv, ProtectError, Protection, classify_path_norm};
+use crate::protect::{
+    NormEnv, ProtectEnv, ProtectError, Protection, Reason, classify_pair_norm, stricter,
+};
 use std::io;
 use std::sync::OnceLock;
 
@@ -69,11 +71,33 @@ pub fn protect_env() -> &'static ProtectEnv {
 }
 
 /// Attribute und Ordner-Eigenschaft eines Pfads, soweit lesbar (sonst leer/Datei).
+/// SYSTEM/HIDDEN werden (unter Windows) von den Elternordnern geerbt, soweit deren
+/// Attribute lesbar sind; die Laufwerks-/Freigabe-Wurzel zählt nicht (sie trägt
+/// unter Windows selbst HIDDEN|SYSTEM).
 fn path_facts(path: &str) -> (NodeFlags, bool) {
-    let Ok(md) = std::fs::symlink_metadata(long_path(path)) else {
+    let lp = long_path(path);
+    let Ok(md) = std::fs::symlink_metadata(&lp) else {
         return (NodeFlags::empty(), false);
     };
     let mut flags = NodeFlags::empty();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        for anc in std::path::Path::new(&lp).ancestors().skip(1) {
+            if anc.parent().is_none() {
+                break; // Wurzel
+            }
+            if let Ok(m) = std::fs::symlink_metadata(anc) {
+                let a = m.file_attributes();
+                if a & 0x2 != 0 {
+                    flags |= NodeFlags::HIDDEN;
+                }
+                if a & 0x4 != 0 {
+                    flags |= NodeFlags::SYSTEM;
+                }
+            }
+        }
+    }
     if md.file_type().is_symlink() {
         flags |= NodeFlags::REPARSE;
     }
@@ -97,16 +121,67 @@ fn path_facts(path: &str) -> (NodeFlags, bool) {
     (flags, md.is_dir())
 }
 
+/// Ergebnis der Pfad-Auflösung für den Löschschutz.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// Echter Pfad (Elternordner aufgelöst, Name unverändert).
+    Real(String),
+    /// Ziel existiert nicht (mehr): nichts zu löschen, nur der Roh-Pfad zählt.
+    Gone,
+    /// Elternordner nicht auflösbar, Ziel existiert aber → gesperrt.
+    Unresolvable,
+}
+
+/// Echte Auflösung: `canonicalize` des **Elternordners** plus unveränderter Name.
+/// Ein Link selbst wird so nicht verfolgt (er wird gelöscht, nicht sein Ziel), aber
+/// subst-/Netzlaufwerke und Junctions im Elternpfad werden auf das echte Ziel
+/// aufgelöst. Unter Windows liefert `canonicalize` `\\?\C:\…` bzw. `\\?\UNC\…`;
+/// das Präfix entfernt [`strip_long_prefix`] (UNC bleibt UNC).
+pub fn resolve_real(path: &str) -> Resolved {
+    let lp = long_path(path);
+    let p = std::path::Path::new(&lp);
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+        // Wurzel o. Ä.: kein Elternordner, der Roh-Pfad wird ohnehin bewertet.
+        return Resolved::Real(path.to_string());
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(rp) => Resolved::Real(strip_long_prefix(&rp.join(name).to_string_lossy())),
+        Err(_) => match std::fs::symlink_metadata(&lp) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Resolved::Gone,
+            _ => Resolved::Unresolvable,
+        },
+    }
+}
+
 /// Prüft alle Pfade, bevor irgendetwas gelöscht wird (alles oder nichts):
 /// Ist ein Pfad `Blocked`, endet der Aufruf mit `ErrorKind::PermissionDenied` und einer
 /// [`ProtectError`]-Nutzlast (Pfad, Grund, Anzahl). `Caution` ist erlaubt.
+/// Bewertet wird der Roh-Pfad **und** der aufgelöste Pfad ([`resolve_real`]); die
+/// strengere Stufe gilt.
 pub fn guard_paths(paths: &[String], env: &ProtectEnv) -> io::Result<()> {
+    guard_paths_with(paths, env, &resolve_real)
+}
+
+/// Wie [`guard_paths`] mit eigener Auflösung (Tests: Windows-Szenarien auf Linux).
+pub fn guard_paths_with(
+    paths: &[String],
+    env: &ProtectEnv,
+    resolve: &dyn Fn(&str) -> Resolved,
+) -> io::Result<()> {
     let ne = NormEnv::new(env);
     let mut first: Option<ProtectError> = None;
     let mut count = 0usize;
     for p in paths {
         let (flags, is_dir) = path_facts(p);
-        if let Protection::Blocked(reason) = classify_path_norm(p, flags, is_dir, &ne) {
+        let prot = match resolve(p) {
+            Resolved::Real(r) => classify_pair_norm(p, Some(&r), flags, is_dir, &ne),
+            Resolved::Gone => classify_pair_norm(p, None, flags, is_dir, &ne),
+            Resolved::Unresolvable => stricter(
+                classify_pair_norm(p, None, flags, is_dir, &ne),
+                Protection::Blocked(Reason::Unresolvable),
+            ),
+        };
+        if let Protection::Blocked(reason) = prot {
             count += 1;
             if first.is_none() {
                 first = Some(ProtectError {
@@ -446,5 +521,112 @@ mod guard_tests {
         }
         assert!(guard_paths(&[r"C:\Windows.old".into()], &env).is_ok());
         assert!(std::ptr::eq(protect_env(), protect_env()));
+    }
+
+    fn reason_of(e: &io::Error) -> Reason {
+        e.get_ref()
+            .and_then(|e| e.downcast_ref::<ProtectError>())
+            .expect("ProtectError")
+            .reason
+    }
+
+    /// Fake-Auflösung: Präfix ersetzen (Windows-Szenarien auf Linux).
+    fn fake(map: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Resolved {
+        move |p: &str| {
+            for (from, to) in map {
+                if p.len() >= from.len() && p[..from.len()].eq_ignore_ascii_case(from) {
+                    return Resolved::Real(format!("{to}{}", &p[from.len()..]));
+                }
+            }
+            Resolved::Real(p.to_string())
+        }
+    }
+
+    #[test]
+    fn guard_checks_resolved_path() {
+        let env = ProtectEnv::windows_default();
+        let one =
+            |p: &str, r: &dyn Fn(&str) -> Resolved| guard_paths_with(&[p.to_string()], &env, r);
+        // subst X: = C:\
+        let subst = fake(&[(r"X:\", r"\\?\C:\")]);
+        let e = one(r"X:\Windows\System32", &subst).expect_err("subst");
+        assert_eq!(reason_of(&e), Reason::WindowsDir);
+        // ohne Auflösung wäre es nur Vorsicht
+        assert!(one(r"X:\Windows\System32", &|p: &str| Resolved::Real(p.into())).is_ok());
+        // Netzlaufwerk Z: = \\server\c$
+        let net = fake(&[(r"Z:\", r"\\?\UNC\server\c$\")]);
+        let e = one(r"Z:\Windows\System32", &net).expect_err("netz");
+        assert_eq!(reason_of(&e), Reason::WindowsDir);
+        // Netzlaufwerk auf normale Freigabe: Systemordner dort gesperrt
+        let nas = fake(&[(r"Y:\", r"\\nas\daten\")]);
+        let e = one(r"Y:\Program Files\x", &nas).expect_err("nas");
+        assert_eq!(reason_of(&e), Reason::AliasedSystem);
+        // Freigabe namens C
+        let e = one(r"\\pc\C\Windows\System32", &|p: &str| {
+            Resolved::Real(p.into())
+        })
+        .expect_err("share C");
+        assert_eq!(reason_of(&e), Reason::AliasedSystem);
+        // 8.3-Kurzname tief im Profil
+        let e = one(
+            r"C:\Users\joschy\AppData\Local\Microsoft\WINDOW~1",
+            &|p: &str| Resolved::Real(p.into()),
+        )
+        .expect_err("kurzname");
+        assert_eq!(reason_of(&e), Reason::ShortName);
+        // subst auf ein anderes echtes Laufwerk: Vorsicht, erlaubt
+        let other = fake(&[(r"X:\", r"D:\")]);
+        assert!(one(r"X:\Windows\x", &other).is_ok());
+        // nicht auflösbar, Ziel existiert → gesperrt; verschwunden → nichts zu sperren
+        let e = one(r"D:\Daten\x", &|_: &str| Resolved::Unresolvable).expect_err("unres");
+        assert_eq!(reason_of(&e), Reason::Unresolvable);
+        assert!(one(r"D:\Daten\x", &|_: &str| Resolved::Gone).is_ok());
+    }
+
+    #[test]
+    fn resolve_real_basics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let f = base.join("a.txt");
+        std::fs::write(&f, b"x").expect("write");
+        let fs = f.to_string_lossy().into_owned();
+        assert_eq!(resolve_real(&fs), Resolved::Real(strip_long_prefix(&fs)));
+        // Elternordner fehlt, Ziel auch → Gone
+        let gone = base.join("fehlt").join("b.txt");
+        assert_eq!(resolve_real(&gone.to_string_lossy()), Resolved::Gone);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_parent_into_protected_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let win = base.join("win");
+        std::fs::create_dir(&win).expect("mkdir");
+        let sys = win.join("kernel.dll");
+        std::fs::write(&sys, b"x").expect("write");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&win, &link).expect("symlink");
+        let env = ProtectEnv {
+            windows_dir: win.to_string_lossy().into_owned(),
+            ..ProtectEnv::windows_default()
+        };
+        let via_link = link.join("kernel.dll").to_string_lossy().into_owned();
+        // Text allein wäre frei, der aufgelöste Pfad liegt im "Windows-Ordner".
+        assert!(
+            !crate::protect::classify_path(&via_link, NodeFlags::empty(), false, &env).is_blocked()
+        );
+        let e = guard_paths(std::slice::from_ref(&via_link), &env).expect_err("link");
+        assert_eq!(reason_of(&e), Reason::WindowsDir);
+        let r = delete_permanently_with_env(std::slice::from_ref(&via_link), &env);
+        assert_eq!(
+            r.expect_err("abbruch").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(sys.exists());
+        // Der Link selbst wird nicht verfolgt: löschbar (nur der Link).
+        let l = link.to_string_lossy().into_owned();
+        assert!(guard_paths(&[l], &env).is_ok());
+        assert!(guard_paths(&[win.to_string_lossy().into_owned()], &env).is_err());
     }
 }

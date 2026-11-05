@@ -19,7 +19,15 @@
 //! # Regeln
 //! **Blocked** (nie löschbar):
 //! * Wurzel jedes Laufwerks und jeder Freigabe (`VolumeRoot`).
-//! * Komponenten im 8.3-Kurznamen-Format (`PROGRA~1`) in den ersten drei Ebenen (`ShortName`).
+//! * Komponenten im 8.3-Kurznamen-Format (`PROGRA~1`, `WINDOW~1`) auf **jeder** Pfadebene
+//!   (`ShortName`, Muster `^[^\\]{1,8}~\d+(\.[^\\]{0,3})?$`, case-insensitiv). Das sperrt
+//!   bewusst konservativ auch harmlose Namen wie `ABC~1.tmp`: ein Kurzname kann auf jeden
+//!   geschützten Ordner zeigen, und der Text allein verrät nicht, auf welchen.
+//! * `Windows`, `Program Files*`, `ProgramData` direkt in der Wurzel einer Netzfreigabe
+//!   (`\\pc\C\Windows`) samt Inhalt (`AliasedSystem`): die Freigabe kann das
+//!   Systemlaufwerk eines Rechners sein.
+//! * Pfade, deren echter Ort sich nicht ermitteln lässt, obwohl das Ziel existiert
+//!   (`Unresolvable`, nur im Löschweg).
 //! * `%SystemRoot%` samt allem darunter (Temp, WinSxS, System32 …) (`WindowsDir`).
 //! * `Program Files` / `Program Files (x86)` samt Inhalt (`ProgramFiles`) –
 //!   Programme werden über die Windows-Einstellungen deinstalliert.
@@ -45,9 +53,20 @@
 //! * Profil-Bibliotheken Dokumente/Desktop/Bilder/Videos/Musik/OneDrive samt Inhalt (`UserLibrary`).
 //! * Alles unter `ProgramData` außer `Microsoft` (`ProgramDataApp`).
 //! * `Windows`, `Program Files*`, `ProgramData` in der Wurzel eines Nicht-Systemlaufwerks (`ForeignSystem`).
+//!   Liegt der aufgelöste Pfad (siehe unten) auf einem anderen Wurzelpfad als der
+//!   Roh-Pfad und dort auf dem Systemlaufwerk oder einer Netzfreigabe (subst-Laufwerk,
+//!   Netzlaufwerk), gilt stattdessen **Blocked (AliasedSystem)**. Nur wenn der
+//!   aufgelöste Pfad auf einem anderen echten Laufwerk liegt, bleibt es bei Caution.
 //! * Versteckte Elemente (auch geerbt vom Elternordner) außerhalb von `temp`/`tmp`-Ordnern (`Hidden`).
 //!
 //! **Free**: alles andere (z. B. `C:\Backup`, Downloads, Temp-Inhalte, Datenlaufwerke).
+//!
+//! # Aufgelöste Pfade
+//! Der Pfadtext allein reicht nicht: `X:\Windows` kann über `subst` auf `C:\Windows`
+//! zeigen, `Z:` auf `\\server\c$`, eine Junction im Elternpfad auf einen Systemordner.
+//! Deshalb bewerten der Löschweg (`platform::guard_paths`) und die GUI zusätzlich den
+//! **aufgelösten** Pfad ([`classify_path_real`], [`classify_real`],
+//! [`contains_blocked_real`]); es gilt die **strengere** Stufe ([`stricter`]).
 //!
 //! Vererbung: Ein Element ist Blocked, wenn ein Elternpfad mit einer vererbenden
 //! Regel blockiert ist (Präfixlogik). Ein Ordner mit blockierten Nachkommen ist
@@ -86,10 +105,15 @@ pub enum Reason {
     ReparsePoint,
     Hidden,
     ForeignSystem,
+    // ---- Blocked (nachträglich ergänzt) ----
+    /// Systemordner über eine Netzfreigabe oder ein Ersatz-/Netzlaufwerk.
+    AliasedSystem,
+    /// Echter Ort des Pfads nicht ermittelbar, obwohl das Ziel existiert.
+    Unresolvable,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 23] = [
+    pub const ALL: [Reason; 25] = [
         Reason::VolumeRoot,
         Reason::WindowsDir,
         Reason::ProgramFiles,
@@ -113,6 +137,8 @@ impl Reason {
         Reason::ReparsePoint,
         Reason::Hidden,
         Reason::ForeignSystem,
+        Reason::AliasedSystem,
+        Reason::Unresolvable,
     ];
 
     /// i18n-Key mit kurzer Begründung.
@@ -141,6 +167,8 @@ impl Reason {
             Reason::ReparsePoint => Key::ProtReasonReparsePoint,
             Reason::Hidden => Key::ProtReasonHidden,
             Reason::ForeignSystem => Key::ProtReasonForeignSystem,
+            Reason::AliasedSystem => Key::ProtReasonAliasedSystem,
+            Reason::Unresolvable => Key::ProtReasonUnresolvable,
         }
     }
 
@@ -162,6 +190,7 @@ impl Reason {
                 | Reason::SystemFlag
                 | Reason::InvalidPath
                 | Reason::ShortName
+                | Reason::AliasedSystem
         )
     }
 }
@@ -503,20 +532,25 @@ const FOREIGN_SYSTEM: &[&str] = &[
     "programdata",
 ];
 
-/// 8.3-Kurzname wie `progra~1` oder `longfi~1.txt`.
+/// 8.3-Kurzname wie `progra~1` oder `longfi~1.txt`: entspricht dem Muster
+/// `^[^\\]{1,8}~\d+(\.[^\\]{0,3})?$` (Komponenten enthalten nie `\\`).
 fn is_short_name(c: &str) -> bool {
-    let stem = match c.rsplit_once('.') {
-        Some((s, e)) if (1..=3).contains(&e.len()) && !e.contains('~') => s,
-        _ => c,
-    };
-    let Some((head, digits)) = stem.rsplit_once('~') else {
-        return false;
-    };
-    let hl = head.chars().count();
-    (1..=8).contains(&hl)
-        && !head.contains(['.', ' '])
-        && !digits.is_empty()
-        && digits.bytes().all(|b| b.is_ascii_digit())
+    c.char_indices().filter(|&(_, ch)| ch == '~').any(|(i, _)| {
+        let head = c[..i].chars().count();
+        if !(1..=8).contains(&head) {
+            return false;
+        }
+        let rest = &c[i + 1..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return false;
+        }
+        let tail = &rest[digits..];
+        tail.is_empty()
+            || tail
+                .strip_prefix('.')
+                .is_some_and(|e| e.chars().count() <= 3)
+    })
 }
 
 fn is_library(name: &str) -> bool {
@@ -530,7 +564,7 @@ pub(crate) fn eval(p: &NPath, flags: NodeFlags, is_dir: bool, env: &NormEnv) -> 
     let Some(first) = c.first() else {
         return Blocked(Reason::VolumeRoot);
     };
-    if c.iter().take(3).any(|x| is_short_name(x)) {
+    if c.iter().any(|x| is_short_name(x)) {
         return Blocked(Reason::ShortName);
     }
     if env.windows.as_ref().is_some_and(|w| p.under(w)) {
@@ -562,6 +596,9 @@ pub(crate) fn eval(p: &NPath, flags: NodeFlags, is_dir: bool, env: &NormEnv) -> 
         if c.len() == 1 && ROOT_SYSTEM_FILES.contains(&first.as_str()) {
             return Blocked(Reason::SystemFile);
         }
+    } else if FOREIGN_SYSTEM.contains(&first.as_str()) {
+        // \\pc\C\Windows: die Freigabe kann ein Systemlaufwerk sein.
+        return Blocked(Reason::AliasedSystem);
     }
     if env.users.as_ref().is_some_and(|u| p.same(u)) {
         return Blocked(Reason::UsersDir);
@@ -644,6 +681,143 @@ pub(crate) fn classify_path_norm(
     }
 }
 
+/// Rangfolge der Stufen: Free < Caution < Blocked.
+fn rank(p: Protection) -> u8 {
+    match p {
+        Protection::Free => 0,
+        Protection::Caution(_) => 1,
+        Protection::Blocked(_) => 2,
+    }
+}
+
+/// Die strengere der beiden Stufen (bei Gleichstand `a`).
+pub fn stricter(a: Protection, b: Protection) -> Protection {
+    if rank(b) > rank(a) { b } else { a }
+}
+
+/// Zeigt der Roh-Pfad über einen anderen Wurzelpfad (subst-, Netzlaufwerk) auf das
+/// Systemlaufwerk oder eine Netzfreigabe?
+fn aliased(raw: &NPath, real: &NPath, env: &NormEnv) -> bool {
+    raw.root != real.root && (real.root == env.sys_root || !real.is_drive())
+}
+
+/// `ForeignSystem` wird über einen Alias zum Systemlaufwerk/Netz zu `Blocked`.
+fn upgrade(prot: Protection, aliased: bool) -> Protection {
+    match prot {
+        Protection::Caution(Reason::ForeignSystem) if aliased => {
+            Protection::Blocked(Reason::AliasedSystem)
+        }
+        p => p,
+    }
+}
+
+/// Roh-Pfad und (optional) aufgelösten Pfad bewerten; die strengere Stufe gilt.
+pub(crate) fn classify_pair_norm(
+    raw: &str,
+    real: Option<&str>,
+    flags: NodeFlags,
+    is_dir: bool,
+    env: &NormEnv,
+) -> Protection {
+    let Some(rp) = env.normalize(raw) else {
+        return Protection::Blocked(Reason::InvalidPath);
+    };
+    let raw_prot = eval(&rp, flags, is_dir, env);
+    let Some(real) = real else {
+        return raw_prot;
+    };
+    let Some(qp) = env.normalize(real) else {
+        // Aufgelöster Pfad nicht bewertbar (z. B. Volume-GUID ohne Laufwerksbuchstaben).
+        return stricter(raw_prot, Protection::Blocked(Reason::Unresolvable));
+    };
+    // Bei Gleichstand gewinnt der Grund des echten Pfads (aussagekräftiger).
+    stricter(
+        eval(&qp, flags, is_dir, env),
+        upgrade(raw_prot, aliased(&rp, &qp, env)),
+    )
+}
+
+/// Wie [`classify_path`], zusätzlich mit dem aufgelösten Pfad `real`
+/// (z. B. `X:\Windows` → `C:\Windows` bei einem subst-Laufwerk). Die strengere Stufe gilt.
+pub fn classify_path_real(
+    path: &str,
+    real: Option<&str>,
+    flags: NodeFlags,
+    is_dir: bool,
+    env: &ProtectEnv,
+) -> Protection {
+    classify_pair_norm(path, real, flags, is_dir, &NormEnv::new(env))
+}
+
+/// "Echter" Pfad eines Knotens: `real_root` plus relativer Pfad innerhalb des Baums
+/// (ohne Dateisystemzugriff).
+pub fn real_path(tree: &Tree, id: NodeId, real_root: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut cur = id;
+    while cur != NO_NODE && cur != tree.root() {
+        let n = tree.node(cur);
+        parts.push(&n.name);
+        cur = n.parent;
+    }
+    let mut out = real_root.to_string();
+    for p in parts.iter().rev() {
+        if !out.ends_with(['\\', '/']) {
+            out.push('\\');
+        }
+        out.push_str(p);
+    }
+    out
+}
+
+/// Wie [`classify`], zusätzlich mit dem echten Pfad unter `real_root`
+/// (aufgelöste Scan-Wurzel). Die strengere Stufe gilt.
+pub fn classify_real(
+    tree: &Tree,
+    id: NodeId,
+    real_root: Option<&str>,
+    env: &ProtectEnv,
+) -> Protection {
+    let n = tree.node(id);
+    let real = real_root.map(|r| real_path(tree, id, r));
+    classify_pair_norm(
+        &tree.full_path(id),
+        real.as_deref(),
+        n.flags | ancestor_flags(tree, id),
+        n.is_dir(),
+        &NormEnv::new(env),
+    )
+}
+
+/// Wie [`contains_blocked`], zusätzlich mit dem echten Pfad unter `real_root`.
+pub fn contains_blocked_real(
+    tree: &Tree,
+    id: NodeId,
+    real_root: Option<&str>,
+    env: &ProtectEnv,
+) -> bool {
+    let ne = NormEnv::new(env);
+    let Some(rr) = real_root else {
+        return contains_blocked_norm(tree, id, &ne);
+    };
+    let raw_start = tree.full_path(id);
+    let real_start = real_path(tree, id, rr);
+    let (Some(rp), Some(qp)) = (ne.normalize(&raw_start), ne.normalize(&real_start)) else {
+        return true;
+    };
+    let alias = aliased(&rp, &qp, &ne);
+    let hit = |start: &str, alias: bool| {
+        walk_from(tree, id, start, &ne, |_, _, prot| {
+            if upgrade(prot, alias).is_blocked() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(Visit::Descend)
+            }
+        })
+        .is_some()
+    };
+    hit(&raw_start, alias) || hit(&real_start, false)
+}
+
 /// SYSTEM und HIDDEN vererben sich auf Nachkommen.
 const INHERITED_FLAGS: NodeFlags = NodeFlags::SYSTEM.union(NodeFlags::HIDDEN);
 
@@ -680,11 +854,22 @@ pub(crate) fn walk<B>(
     tree: &Tree,
     start: NodeId,
     env: &NormEnv,
+    f: impl FnMut(NodeId, &NPath, Protection) -> ControlFlow<B, Visit>,
+) -> Option<B> {
+    walk_from(tree, start, &tree.full_path(start), env, f)
+}
+
+/// Wie [`walk`], aber mit eigenem Pfad für `start` (z. B. aufgelöste Scan-Wurzel).
+pub(crate) fn walk_from<B>(
+    tree: &Tree,
+    start: NodeId,
+    start_path: &str,
+    env: &NormEnv,
     mut f: impl FnMut(NodeId, &NPath, Protection) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
     let sn = tree.node(start);
     let start_flags = sn.flags | ancestor_flags(tree, start);
-    let (mut path, start_prot) = match env.normalize(&tree.full_path(start)) {
+    let (mut path, start_prot) = match env.normalize(start_path) {
         Some(p) => {
             let prot = eval(&p, start_flags, sn.is_dir(), env);
             (p, prot)
@@ -1046,10 +1231,154 @@ mod tests {
         blocked(r"C:\PROGRA~2\Steam", Reason::ShortName);
         blocked(r"C:\Users\JOSCHY~1\AppData", Reason::ShortName);
         blocked(r"C:\a\b\LONGFI~1.TXT", Reason::ShortName);
-        // ab Ebene 4 nicht mehr
-        free(r"C:\a\b\c\FOO~1");
+        // auf jeder Ebene, auch tief im Profil
+        blocked(r"C:\a\b\c\FOO~1", Reason::ShortName);
+        blocked(
+            r"C:\Users\joschy\AppData\Local\Microsoft\WINDOW~1",
+            Reason::ShortName,
+        );
+        blocked(r"D:\x\y\z\w\v\window~12.ab", Reason::ShortName);
+        // bewusst konservativ: auch harmlose Namen
+        blocked(r"D:\Daten\ABC~1.tmp", Reason::ShortName);
+        blocked(r"D:\Daten\A.B~1", Reason::ShortName);
         free(r"C:\Backup\~$brief.docx");
         free(r"C:\Backup\a~b");
+        free(r"C:\Backup\ABCDEFGHI~1");
+        free(r"C:\Backup\ABC~1.TEXT");
+        free(r"C:\Backup\ABC~.txt");
+        free(r"C:\Backup\ABC~1x");
+    }
+
+    #[test]
+    fn unc_share_with_system_folders() {
+        blocked(r"\\pc\C\Windows\System32", Reason::AliasedSystem);
+        blocked(r"\\pc\C\Program Files\x", Reason::AliasedSystem);
+        blocked(r"\\pc\daten\ProgramData", Reason::AliasedSystem);
+        blocked(r"\\?\UNC\pc\C\Windows", Reason::AliasedSystem);
+        free(r"\\pc\C\Daten\Windows");
+        free(r"\\pc\C\Daten");
+    }
+
+    fn real(raw: &str, real: &str) -> Protection {
+        classify_path_real(raw, Some(real), NodeFlags::empty(), false, &env())
+    }
+
+    #[test]
+    fn resolved_path_is_checked_too() {
+        use Protection::{Blocked, Caution, Free};
+        // subst X: = C:\
+        assert_eq!(
+            real(r"X:\Windows\System32", r"\\?\C:\Windows\System32"),
+            Blocked(Reason::WindowsDir)
+        );
+        // Netzlaufwerk Z: = \\server\c$
+        assert_eq!(
+            real(
+                r"Z:\Windows\System32",
+                r"\\?\UNC\server\c$\Windows\System32"
+            ),
+            Blocked(Reason::WindowsDir)
+        );
+        // subst X: = C:\Daten → Windows-Ordner im Alias auf dem Systemlaufwerk
+        assert_eq!(
+            real(r"X:\Windows", r"C:\Daten\Windows"),
+            Blocked(Reason::AliasedSystem)
+        );
+        // Netzlaufwerk auf eine normale Freigabe
+        assert_eq!(
+            real(r"Z:\Program Files\x", r"\\nas\daten\sub\Program Files\x"),
+            Blocked(Reason::AliasedSystem)
+        );
+        // subst X: = D:\ (anderes echtes Laufwerk) → bleibt Vorsicht
+        assert_eq!(
+            real(r"X:\Windows", r"D:\Windows"),
+            Caution(Reason::ForeignSystem)
+        );
+        // echtes D: ohne Alias
+        assert_eq!(
+            real(r"D:\Windows", r"\\?\D:\Windows"),
+            Caution(Reason::ForeignSystem)
+        );
+        // Junction im Elternpfad zeigt in Program Files
+        assert_eq!(
+            real(r"D:\Daten\link\a.dll", r"C:\Program Files\App\a.dll"),
+            Blocked(Reason::ProgramFiles)
+        );
+        // Roh-Pfad strenger als der echte: Roh gilt
+        assert_eq!(real(r"C:\Windows\x", r"D:\x"), Blocked(Reason::WindowsDir));
+        // Aufgelöster Pfad nicht bewertbar
+        assert_eq!(
+            real(
+                r"D:\x",
+                r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\x"
+            ),
+            Blocked(Reason::Unresolvable)
+        );
+        assert_eq!(real(r"D:\x", r"D:\x"), Free);
+        assert_eq!(
+            classify_path_real(r"D:\x", None, NodeFlags::empty(), false, &env()),
+            Free
+        );
+        // stricter
+        assert_eq!(
+            stricter(Free, Caution(Reason::Hidden)),
+            Caution(Reason::Hidden)
+        );
+        assert_eq!(
+            stricter(Blocked(Reason::WindowsDir), Blocked(Reason::ShortName)),
+            Blocked(Reason::WindowsDir)
+        );
+        assert_eq!(
+            stricter(Caution(Reason::Hidden), Free),
+            Caution(Reason::Hidden)
+        );
+    }
+
+    #[test]
+    fn tree_with_real_root() {
+        let mut b = TreeBuilder::new(ScanMeta::new("X:\\", ScanMode::Walk), "X:\\");
+        let d = EntryInfo::default();
+        let win = b.add_dir(0, "Windows", d.clone());
+        let sys = b.add_dir(win, "System32", d.clone());
+        let k = b.add_file(sys, "ntoskrnl.exe", d.clone());
+        let data = b.add_dir(0, "Daten", d.clone());
+        let f = b.add_file(data, "a.txt", d.clone());
+        let t = b.finish();
+        let e = env();
+        assert_eq!(
+            real_path(&t, k, r"C:\"),
+            r"C:\Windows\System32\ntoskrnl.exe"
+        );
+        assert_eq!(real_path(&t, 0, r"C:\"), r"C:\");
+        assert_eq!(real_path(&t, f, "/mnt/x"), "/mnt/x\\Daten\\a.txt");
+        // ohne echte Wurzel: nur Vorsicht
+        assert_eq!(
+            classify_real(&t, win, None, &e),
+            Protection::Caution(Reason::ForeignSystem)
+        );
+        assert!(!contains_blocked_real(&t, win, None, &e));
+        // X: = C:\ (subst): gesperrt
+        for id in [win, sys, k] {
+            assert!(classify_real(&t, id, Some(r"C:\"), &e).is_blocked());
+        }
+        assert!(contains_blocked_real(&t, 0, Some(r"C:\"), &e));
+        assert!(contains_blocked_real(&t, win, Some(r"C:\"), &e));
+        assert!(!contains_blocked_real(&t, data, Some(r"C:\"), &e));
+        assert_eq!(classify_real(&t, f, Some(r"C:\"), &e), Protection::Free);
+        // X: = C:\Ablage (Alias auf das Systemlaufwerk): Windows dort gesperrt
+        assert_eq!(
+            classify_real(&t, win, Some(r"C:\Ablage"), &e),
+            Protection::Blocked(Reason::AliasedSystem)
+        );
+        assert!(contains_blocked_real(&t, win, Some(r"C:\Ablage"), &e));
+        // X: = D:\ (echtes anderes Laufwerk): bleibt Vorsicht
+        assert_eq!(
+            classify_real(&t, win, Some(r"D:\"), &e),
+            Protection::Caution(Reason::ForeignSystem)
+        );
+        assert!(!contains_blocked_real(&t, win, Some(r"D:\"), &e));
+        // Netzlaufwerk Z: = \\server\c$
+        assert!(classify_real(&t, sys, Some(r"\\server\c$"), &e).is_blocked());
     }
 
     #[test]

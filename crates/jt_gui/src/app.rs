@@ -62,6 +62,12 @@ pub fn delete_allowed(admin: bool, has_tree: bool, tree_is_live: bool) -> bool {
     admin && has_tree && tree_is_live
 }
 
+/// Gilt ein Element nach dem Löschen als entfernt? Nur wenn das Dateisystem
+/// `NotFound` meldet; "Zugriff verweigert" und andere Fehler heißen: noch da.
+pub fn is_gone<T>(probe: &std::io::Result<T>) -> bool {
+    matches!(probe, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Ersetzt Platzhalter wie `{n}` in übersetzten Texten.
 pub fn fill(template: &str, args: &[(&str, &str)]) -> String {
     let mut s = template.to_string();
@@ -143,7 +149,8 @@ pub struct DetailInfo {
 /// Nachrichten aus Hintergrund-Threads.
 pub enum JobMsg {
     ScanProgress(ScanProgress),
-    ScanDone(Result<Tree, ScanError>),
+    /// Ergebnis und beim Start aufgelöste Scan-Wurzel.
+    ScanDone(Result<Tree, ScanError>, crate::safety::RealRoot),
     TreeLoaded(Tree, PathBuf),
     SnapshotSaved(PathBuf),
     FolderPicked(PathBuf),
@@ -426,7 +433,7 @@ impl JtApp {
                         job.progress = p;
                     }
                 }
-                JobMsg::ScanDone(res) => {
+                JobMsg::ScanDone(res, real_root) => {
                     let job = st.scan.take();
                     match res {
                         Ok(tree) => {
@@ -442,6 +449,7 @@ impl JtApp {
                                 ],
                             );
                             st.set_tree(tree, true);
+                            st.prot.set_real_root(Some(real_root));
                             st.actions.push(Action::StartCleanup);
                             #[cfg(debug_assertions)]
                             if let Some(t) = st.tree.clone() {
@@ -1055,6 +1063,8 @@ impl JtApp {
             follow_reparse: false,
         };
         self.spawn(ctx, JobKind::Scan, move |rep| {
+            // Scan-Ziel auflösen (subst-/Netzlaufwerk, Junction); Fehler -> Roh-Pfad.
+            let real_root = crate::safety::RealRoot::from_system(&req.root);
             let last = Cell::new(Instant::now() - PROGRESS_INTERVAL);
             let progress = |p: &ScanProgress| {
                 if last.get().elapsed() >= PROGRESS_INTERVAL {
@@ -1062,7 +1072,7 @@ impl JtApp {
                     rep.send(JobMsg::ScanProgress(p.clone()));
                 }
             };
-            JobMsg::ScanDone(jt_core::scan::scan(&req, &progress, &cancel))
+            JobMsg::ScanDone(jt_core::scan::scan(&req, &progress, &cancel), real_root)
         });
     }
 
@@ -1089,8 +1099,9 @@ impl JtApp {
         let admin = can_delete();
         let live = self.state.tree_is_live;
         let env = crate::safety::env();
+        let real = self.state.prot.real_root().cloned();
         if let Some(d) = ids.iter().find_map(|&id| {
-            match crate::safety::delete_decision(env, &tree, id, admin, live) {
+            match crate::safety::delete_decision(env, &tree, id, admin, live, real.as_ref()) {
                 Decision::Denied(d) => Some(d),
                 _ => None,
             }
@@ -1108,12 +1119,13 @@ impl JtApp {
             } else {
                 jt_core::platform::move_to_recycle_bin(&paths)
             };
-            // Nur entfernen, was wirklich nicht mehr existiert (auch bei Teilerfolg).
+            // Nur entfernen, was wirklich nicht mehr existiert (auch bei Teilerfolg);
+            // "Zugriff verweigert" o. Ä. heißt nicht gelöscht.
             let removed = ids
                 .iter()
                 .zip(&paths)
                 .filter(|(_, p)| {
-                    std::fs::symlink_metadata(jt_core::platform::long_path(p)).is_err()
+                    is_gone(&std::fs::symlink_metadata(jt_core::platform::long_path(p)))
                 })
                 .map(|(&id, _)| id)
                 .collect();
@@ -1678,6 +1690,33 @@ mod tests {
         assert!(!delete_allowed(false, true, true));
         assert!(!delete_allowed(true, false, true));
         assert!(!delete_allowed(false, false, false));
+    }
+
+    #[test]
+    fn only_not_found_counts_as_removed() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_gone::<()>(&Err(Error::from(ErrorKind::NotFound))));
+        assert!(!is_gone::<()>(&Err(Error::from(
+            ErrorKind::PermissionDenied
+        ))));
+        assert!(!is_gone::<()>(&Err(Error::other("Freigabe weg"))));
+        assert!(!is_gone(&Ok(())));
+        let dir = std::env::temp_dir();
+        assert!(is_gone(&std::fs::symlink_metadata(
+            dir.join("joschys_tree_gibt_es_nicht_7f3a")
+        )));
+        assert!(!is_gone(&std::fs::symlink_metadata(&dir)));
+    }
+
+    #[test]
+    fn set_tree_clears_real_root() {
+        let mut st = AppState::new(Settings::default());
+        st.set_tree(sample_tree(), true);
+        st.prot
+            .set_real_root(Some(crate::safety::RealRoot::from_system("C:\\")));
+        assert!(st.prot.real_root().is_some());
+        st.set_tree(sample_tree(), true);
+        assert!(st.prot.real_root().is_none());
     }
 
     #[test]

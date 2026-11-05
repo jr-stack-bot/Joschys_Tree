@@ -70,9 +70,12 @@ Aufräum-Assistent:
 
 Jedes Element bekommt eine Schutzstufe; gelöscht wird nur über den Papierkorb bzw. mit Bestätigung, und der Löschweg prüft die Stufe noch einmal selbst:
 
-- **Gesperrt:** Windows-Ordner, Programme (`Program Files`), `ProgramData\Microsoft`, Laufwerkswurzeln, `pagefile.sys`/`hiberfil.sys`/`$Recycle.Bin`, Benutzerprofile selbst, `NTUSER.DAT` und alles mit System-Attribut – nie löschbar, auch nicht als Teil eines Ordners.
+- **Gesperrt:** Windows-Ordner, Programme (`Program Files`), `ProgramData\Microsoft`, Laufwerkswurzeln, `pagefile.sys`/`hiberfil.sys`/`$Recycle.Bin`, Benutzerprofile selbst, `NTUSER.DAT` und alles mit System-Attribut – nie löschbar, auch nicht als Teil eines Ordners. Ebenso 8.3-Kurznamen wie `PROGRA~1` auf jeder Pfadebene (bewusst streng, das trifft auch harmlose Namen wie `ABC~1.tmp`) und Systemordner auf Netzfreigaben (`\\pc\C\Windows`).
+- **Aufgelöste Pfade:** Geprüft wird nicht nur der Pfadtext, sondern auch der echte Ort – ein subst- oder Netzlaufwerk (`X:` = `C:\`, `Z:` = `\\server\c$`) oder eine Junction im Elternordner kann nicht am Schutz vorbei führen; die strengere Stufe gilt. Lässt sich der echte Ort eines vorhandenen Elements nicht ermitteln, ist es gesperrt.
 - **Vorsicht:** `AppData`-Inhalte (Browser, Programme), Dokumente/Bilder/OneDrive, `Windows.old`, Programmdaten in `ProgramData`, versteckte Dateien, Verknüpfungen – löschbar nach roter Warnung und Häkchen "Ich weiß, was ich tue".
 - **Frei:** alles andere, z. B. Temp-Inhalte, Downloads, eigene Daten- und Backup-Ordner.
+- **"Alle empfohlenen in den Korb"** nimmt nur temporäre Benutzerdateien, Browser-Cache, Absturzberichte und leere Ordner mit. Große Temp-Dateien (nur `.tmp`/`.chk`/`.dmp`), Installer (`.iso`/`.msi`/`.exe` …), alte Downloads und große alte Dateien legt man bewusst einzeln in den Korb.
+- **Backups und Archive werden nicht empfohlen:** `.bak`/`.old`/`.log`, `.zip`/`.7z`/`.rar`, VM-Abbilder (`.vhdx`, `.vmdk` …), Outlook-Postfächer, Datenbanken, Passwort-Tresore, Systemabbilder sowie `steamapps`- und `DockerDesktop`-Ordner schlägt der Aufräum-Assistent nie vor, OneDrive-Dateien "nur online" ebenfalls nicht (Löschen würde auch in der Cloud löschen).
 - Info statt Löschen: Ruhezustand, Auslagerungsdatei, `Windows.old` und Papierkorb zeigt der Aufräum-Assistent nur mit Hinweis auf das passende Windows-Werkzeug.
 - Löschen nur als Administrator in einem frischen Scan; geladene Snapshots bleiben schreibgeschützt.
 

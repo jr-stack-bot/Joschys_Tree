@@ -4,10 +4,15 @@
 // Eine einzige, reine Entscheidungsfunktion für alle Lösch- und Korb-Wege. Die GUI
 // zeigt Menüpunkte nur an bzw. aktiviert sie nur, wenn diese Funktion zustimmt; der
 // Löschweg in jt_core prüft zusätzlich unabhängig (guard_paths).
+//
+// Zusätzlich zum Pfadtext wird der "echte" Pfad bewertet: die beim Scan-Start
+// aufgelöste Scan-Wurzel (`RealRoot`, z. B. X: -> C:\ bei subst) plus der relative
+// Pfad des Knotens im Baum. Die strengere Stufe gilt.
 
 use std::collections::HashMap;
+use std::io;
 
-use jt_core::protect::{ProtectEnv, Protection, Reason, classify, contains_blocked};
+use jt_core::protect::{ProtectEnv, Protection, Reason, classify_real, contains_blocked_real};
 use jt_core::{Key, Lang, NO_NODE, NodeId, Tree, tr};
 
 /// Warum ein Element nicht gelöscht werden darf.
@@ -74,14 +79,58 @@ pub fn decide(
     }
 }
 
+/// Beim Scan-Start aufgelöste Scan-Wurzel (neben `meta.root_path`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealRoot {
+    /// Aufgelöster Pfad, bei Fehler der Roh-Pfad.
+    pub path: String,
+    /// `false`: Auflösung fehlgeschlagen, `path` ist der Roh-Pfad.
+    pub resolved: bool,
+}
+
+impl RealRoot {
+    /// Löst `root` mit `canon` auf; bei Fehler gilt der Roh-Pfad (und das wird gemerkt).
+    pub fn resolve(root: &str, canon: impl FnOnce(&str) -> io::Result<String>) -> Self {
+        match canon(root) {
+            Ok(p) => RealRoot {
+                path: jt_core::platform::strip_long_prefix(&p),
+                resolved: true,
+            },
+            Err(_) => RealRoot {
+                path: root.to_string(),
+                resolved: false,
+            },
+        }
+    }
+
+    /// Echte Auflösung mit `std::fs::canonicalize`.
+    pub fn from_system(root: &str) -> Self {
+        Self::resolve(root, |r| {
+            std::fs::canonicalize(jt_core::platform::long_path(r))
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+    }
+
+    /// Pfad für die zusätzliche Bewertung (nur wenn aufgelöst; sonst reicht der Roh-Pfad).
+    pub fn effective(&self) -> Option<&str> {
+        self.resolved.then_some(self.path.as_str())
+    }
+}
+
+fn effective(real: Option<&RealRoot>) -> Option<&str> {
+    real.and_then(RealRoot::effective)
+}
+
 /// Darf `id` gelöscht werden? Nur als Admin, nur im Live-Scan, nur wenn der
 /// Löschschutz es erlaubt und (bei Ordnern) nichts Geschütztes darin liegt.
+/// Bewertet Roh-Pfad und echten Pfad unter `real` (die strengere Stufe gilt).
 pub fn delete_decision(
     env: &ProtectEnv,
     tree: &Tree,
     id: NodeId,
     admin: bool,
     live: bool,
+    real: Option<&RealRoot>,
 ) -> Decision {
     if !admin {
         return Decision::Denied(Deny::NotAdmin);
@@ -90,11 +139,12 @@ pub fn delete_decision(
         return Decision::Denied(Deny::NotLive);
     }
     let n = tree.node(id);
+    let rr = effective(real);
     decide(
-        classify(tree, id, env),
+        classify_real(tree, id, rr, env),
         id == tree.root(),
         n.is_dir(),
-        || contains_blocked(tree, id, env),
+        || contains_blocked_real(tree, id, rr, env),
     )
 }
 
@@ -110,16 +160,30 @@ pub struct ProtCache {
     gen_: u64,
     prot: HashMap<NodeId, Protection>,
     inner: HashMap<NodeId, bool>,
+    /// Aufgelöste Scan-Wurzel des aktuellen Baums (nur Live-Scan).
+    real: Option<RealRoot>,
 }
 
 impl ProtCache {
-    /// Bei neuer Baum-Generation alles verwerfen.
+    /// Bei neuer Baum-Generation alles verwerfen (auch die echte Wurzel).
     pub fn sync(&mut self, gen_: u64) {
         if self.gen_ != gen_ {
             self.prot.clear();
             self.inner.clear();
+            self.real = None;
             self.gen_ = gen_;
         }
+    }
+
+    /// Echte Scan-Wurzel des aktuellen Baums setzen (verwirft gecachte Stufen).
+    pub fn set_real_root(&mut self, real: Option<RealRoot>) {
+        self.prot.clear();
+        self.inner.clear();
+        self.real = real;
+    }
+
+    pub fn real_root(&self) -> Option<&RealRoot> {
+        self.real.as_ref()
     }
 
     #[cfg(test)]
@@ -139,7 +203,7 @@ impl ProtCache {
             .flatten()
         {
             Some(&Protection::Blocked(r)) if r.is_inherited() => Protection::Blocked(r),
-            _ => classify(tree, id, env()),
+            _ => classify_real(tree, id, effective(self.real.as_ref()), env()),
         };
         self.prot.insert(id, p);
         p
@@ -147,10 +211,11 @@ impl ProtCache {
 
     /// Enthält der Teilbaum ein gesperrtes Element? (gecacht, Tiefensuche nur einmal)
     pub fn contains_blocked(&mut self, tree: &Tree, id: NodeId) -> bool {
+        let rr = effective(self.real.as_ref());
         *self
             .inner
             .entry(id)
-            .or_insert_with(|| contains_blocked(tree, id, env()))
+            .or_insert_with(|| contains_blocked_real(tree, id, rr, env()))
     }
 
     /// Darf das Element in den Auswahlkorb? (Schutz ohne Rechte-Prüfung)
@@ -220,7 +285,7 @@ pub mod tests {
     fn decision_rules() {
         let t = win_tree();
         let env = ProtectEnv::windows_default();
-        let d = |p: &str| delete_decision(&env, &t, id(&t, p), true, true);
+        let d = |p: &str| delete_decision(&env, &t, id(&t, p), true, true, None);
         assert_eq!(d("C:\\Users\\demo\\Downloads\\old.iso"), Decision::Allowed);
         assert_eq!(d("C:\\Data"), Decision::Allowed);
         assert!(matches!(
@@ -245,7 +310,7 @@ pub mod tests {
         assert_eq!(d("C:\\Backup\\a.zip"), Decision::Allowed);
         // Wurzel des Scans nie.
         assert_eq!(
-            delete_decision(&env, &t, 0, true, true),
+            delete_decision(&env, &t, 0, true, true, None),
             Decision::Denied(Deny::ScanRoot)
         );
     }
@@ -256,15 +321,15 @@ pub mod tests {
         let env = ProtectEnv::windows_default();
         let iso = id(&t, "C:\\Users\\demo\\Downloads\\old.iso");
         assert_eq!(
-            delete_decision(&env, &t, iso, false, true),
+            delete_decision(&env, &t, iso, false, true, None),
             Decision::Denied(Deny::NotAdmin)
         );
         assert_eq!(
-            delete_decision(&env, &t, iso, true, false),
+            delete_decision(&env, &t, iso, true, false, None),
             Decision::Denied(Deny::NotLive)
         );
         assert_eq!(
-            delete_decision(&env, &t, iso, false, false),
+            delete_decision(&env, &t, iso, false, false, None),
             Decision::Denied(Deny::NotAdmin)
         );
     }
@@ -301,11 +366,11 @@ pub mod tests {
         for i in 0..t.nodes.len() as NodeId {
             assert_eq!(
                 c.decision(&t, i, true, true),
-                delete_decision(env, &t, i, true, true),
+                delete_decision(env, &t, i, true, true, None),
                 "{}",
                 t.full_path(i)
             );
-            assert_eq!(c.protection(&t, i), classify(&t, i, env));
+            assert_eq!(c.protection(&t, i), jt_core::protect::classify(&t, i, env));
         }
         assert_eq!(
             c.decision(&t, 3, false, true),
@@ -316,6 +381,89 @@ pub mod tests {
         assert!(c.len() > 0);
         c.sync(2);
         assert_eq!(c.len(), 0);
+    }
+
+    /// Baum mit Scan-Wurzel X:\ (subst-/Netzlaufwerk).
+    fn x_tree() -> Tree {
+        let mut b = TreeBuilder::new(ScanMeta::new("X:\\", ScanMode::Walk), "X:\\");
+        let d = EntryInfo::default();
+        let win = b.add_dir(0, "Windows", d.clone());
+        let sys = b.add_dir(win, "System32", d.clone());
+        b.add_file(sys, "ntoskrnl.exe", file(10, NodeFlags::empty()));
+        let data = b.add_dir(0, "Daten", d);
+        b.add_file(data, "a.txt", file(3, NodeFlags::empty()));
+        b.finish()
+    }
+
+    #[test]
+    fn real_root_resolution() {
+        let ok = RealRoot::resolve("X:\\", |_| Ok(r"\\?\C:\".to_string()));
+        assert_eq!(ok.path, r"C:\");
+        assert!(ok.resolved);
+        assert_eq!(ok.effective(), Some(r"C:\"));
+        let unc = RealRoot::resolve("Z:\\", |_| Ok(r"\\?\UNC\server\c$\".to_string()));
+        assert_eq!(unc.path, r"\\server\c$\");
+        let bad = RealRoot::resolve("X:\\", |_| Err(io::Error::other("kaputt")));
+        assert_eq!(bad.path, "X:\\");
+        assert!(!bad.resolved);
+        assert_eq!(bad.effective(), None);
+        // Echte Auflösung: nicht existierender Pfad -> Roh-Pfad, gemerkt.
+        let none = RealRoot::from_system("/gibt/es/nicht/joschy");
+        assert!(!none.resolved);
+    }
+
+    #[test]
+    fn decision_uses_real_root() {
+        let t = x_tree();
+        let env = ProtectEnv::windows_default();
+        let sys = id(&t, "X:\\Windows\\System32");
+        let win = id(&t, "X:\\Windows");
+        let txt = id(&t, "X:\\Daten\\a.txt");
+        let d = |n: NodeId, r: Option<&RealRoot>| delete_decision(&env, &t, n, true, true, r);
+        // Ohne echte Wurzel: nur Vorsicht (fremdes Laufwerk).
+        assert_eq!(d(sys, None), Decision::NeedsAck(Reason::ForeignSystem));
+        // subst X: = C:\ -> gesperrt
+        let subst = RealRoot::resolve("X:\\", |_| Ok(r"\\?\C:\".to_string()));
+        assert!(matches!(
+            d(sys, Some(&subst)),
+            Decision::Denied(Deny::Protected(Reason::WindowsDir))
+        ));
+        assert!(matches!(d(win, Some(&subst)), Decision::Denied(_)));
+        assert_eq!(d(txt, Some(&subst)), Decision::Allowed);
+        // Netzlaufwerk Z: = \\server\c$ -> gesperrt
+        let net = RealRoot::resolve("X:\\", |_| Ok(r"\\?\UNC\server\c$".to_string()));
+        assert!(matches!(d(sys, Some(&net)), Decision::Denied(_)));
+        // Netzlaufwerk auf normale Freigabe -> Systemordner dort gesperrt
+        let nas = RealRoot::resolve("X:\\", |_| Ok(r"\\nas\daten".to_string()));
+        assert!(matches!(
+            d(win, Some(&nas)),
+            Decision::Denied(Deny::Protected(Reason::AliasedSystem))
+        ));
+        // subst auf echtes anderes Laufwerk -> bleibt Vorsicht
+        let other = RealRoot::resolve("X:\\", |_| Ok(r"D:\".to_string()));
+        assert_eq!(
+            d(sys, Some(&other)),
+            Decision::NeedsAck(Reason::ForeignSystem)
+        );
+        // Auflösung fehlgeschlagen -> Roh-Pfad
+        let bad = RealRoot::resolve("X:\\", |_| Err(io::Error::other("x")));
+        assert_eq!(
+            d(sys, Some(&bad)),
+            Decision::NeedsAck(Reason::ForeignSystem)
+        );
+        // Cache: gleiche Entscheidungen, set_real_root verwirft gecachte Stufen.
+        let mut c = ProtCache::default();
+        c.sync(5);
+        assert_eq!(c.decision(&t, sys, true, true), d(sys, None));
+        c.set_real_root(Some(subst.clone()));
+        assert_eq!(c.real_root(), Some(&subst));
+        for n in 0..t.nodes.len() as NodeId {
+            assert_eq!(c.decision(&t, n, true, true), d(n, Some(&subst)), "{n}");
+        }
+        assert!(c.contains_blocked(&t, 0));
+        // Neue Generation: echte Wurzel weg.
+        c.sync(6);
+        assert_eq!(c.real_root(), None);
     }
 
     #[test]

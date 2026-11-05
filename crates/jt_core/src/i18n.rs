@@ -418,11 +418,11 @@ keys! {
     CleanOldDownloads => ("Alte Downloads", "Old downloads"),
     CleanOldDownloadsHint => ("Lange nicht geänderte Dateien im Download-Ordner – vorher durchsehen.", "Files in Downloads not changed for a long time – review them first."),
     CleanOldInstallers => ("Alte Installationsdateien", "Old installers"),
-    CleanOldInstallersHint => ("Große Setup-, ISO- und Archivdateien in Downloads, meist nicht mehr nötig.", "Large setup, ISO and archive files in Downloads, usually no longer needed."),
+    CleanOldInstallersHint => ("Große Setup- und ISO-Dateien in Downloads, meist nicht mehr nötig – vorher durchsehen. Archive (.zip/.7z/.rar) werden nicht vorgeschlagen.", "Large setup and ISO files in Downloads, usually no longer needed – review them first. Archives (.zip/.7z/.rar) are not suggested."),
     CleanLargeOldFiles => ("Große alte Dateien", "Large old files"),
     CleanLargeOldFilesHint => ("Große, lange nicht geänderte Dateien – nur löschen, wenn sicher unnötig.", "Large files not changed for a long time – delete only if surely unneeded."),
-    CleanTempLikeFiles => ("Temp-, Log- und Sicherungsdateien", "Temp, log and backup files"),
-    CleanTempLikeFilesHint => ("Große .tmp/.log/.bak/.old-Dateien; laufende Programme vorher beenden.", "Large .tmp/.log/.bak/.old files; close running programs first."),
+    CleanTempLikeFiles => ("Große Temp-Dateien", "Large temporary files"),
+    CleanTempLikeFilesHint => ("Große .tmp/.chk/.dmp-Dateien außerhalb geschützter Bereiche – vorher durchsehen. Sicherungen (.bak/.old) und Logs werden nie vorgeschlagen.", "Large .tmp/.chk/.dmp files outside protected areas – review them first. Backups (.bak/.old) and logs are never suggested."),
     CleanEmptyFolders => ("Leere Ordner", "Empty folders"),
     CleanEmptyFoldersHint => ("Ordner ohne Dateien; manche Programme legen sie neu an.", "Folders without files; some programs recreate them."),
     CleanInfoHibernation => ("Ruhezustandsdatei (hiberfil.sys)", "Hibernation file (hiberfil.sys)"),
@@ -467,7 +467,7 @@ keys! {
     DenyScanRoot => ("Wurzel des Scans, nicht löschbar", "Scan root, cannot be deleted"),
     CleanSavingsTotal => ("Mögliche Ersparnis: {size}", "Possible savings: {size}"),
     CleanAddRecommended => ("Alle empfohlenen in den Korb", "Add all recommended to basket"),
-    CleanRecommendedNote => ("Ohne \"Alte Downloads\" und \"Große alte Dateien\" – die bitte bewusst auswählen. Gelöscht wird erst nach Bestätigung im Korb.", "Without \"Old downloads\" and \"Large old files\" – please choose those deliberately. Nothing is deleted before you confirm in the basket."),
+    CleanRecommendedNote => ("Nur temporäre Dateien, Browser-Cache, Absturzberichte und leere Ordner. Temp-Dateien, Installer, alte Downloads und große alte Dateien bitte bewusst einzeln in den Korb legen. Gelöscht wird erst nach Bestätigung im Korb.", "Only temporary files, browser cache, crash dumps and empty folders. Please add temp files, installers, old downloads and large old files deliberately one by one. Nothing is deleted before you confirm in the basket."),
     CleanDetailsShow => ("Details", "Details"),
     CleanDetailsHide => ("Details ausblenden", "Hide details"),
     CleanCount => ("{n} Elemente", "{n} items"),
@@ -498,6 +498,8 @@ keys! {
     CatVideo => ("Video", "Video"),
     CatProgram => ("Programme", "Programs"),
     CatOther => ("Sonstige", "Other"),
+    ProtReasonAliasedSystem => ("Systemordner über eine Netzfreigabe oder ein Ersatzlaufwerk, nicht löschbar", "System folder via a network share or substitute drive, cannot be deleted"),
+    ProtReasonUnresolvable => ("Echter Speicherort nicht ermittelbar, nicht löschbar", "Real location cannot be determined, cannot be deleted"),
 }
 
 /// Für den Vollständigkeitstest.
