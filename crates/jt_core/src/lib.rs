@@ -4,6 +4,7 @@
 //! Joschys_Tree Kernbibliothek (ohne GUI). @ Joschy
 
 pub mod aggregate;
+pub mod cleanup;
 pub mod delta;
 pub mod duplicates;
 pub mod export;
@@ -13,6 +14,7 @@ pub mod history;
 pub mod i18n;
 pub mod model;
 pub mod platform;
+pub mod protect;
 pub mod scan;
 pub mod snapshot;
 pub mod stats;

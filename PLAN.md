@@ -45,6 +45,8 @@ joschys_tree/
 │  │     ├─ snapshot.rs       Scan speichern/laden (.jtscan = Header + postcard + lz4)
 │  │     ├─ delta.rs          Delta-Vergleich zweier Trees (per Pfad), Ergebnisliste
 │  │     ├─ history.rs        Verlaufs-/Wachstumsanalyse über N Snapshots eines Ziels
+│  │     ├─ protect.rs        Löschschutz: Pfade als Frei/Vorsicht/Geschützt bewerten (Regeln in der Moduldoku), contains_blocked
+│  │     ├─ cleanup.rs        Aufräum-Assistent: Kandidaten-Gruppen (Temp, Browser-Cache, alte Downloads …) + Info-Gruppen
 │  │     ├─ export/
 │  │     │  ├─ mod.rs         ExportRequest, ExportFormat, gemeinsame Zeilen-Erzeugung (Rows)
 │  │     │  ├─ csv.rs         CSV (UTF-8 mit BOM, Semikolon bei de, Komma bei en)

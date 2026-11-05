@@ -30,8 +30,13 @@ pub struct StreamInfo {
 
 #[cfg(windows)]
 pub use win::{
-    alternate_streams, delete_permanently, is_admin, list_drives, long_path, move_to_recycle_bin,
-    open_in_explorer, security_info, volume_info,
+    alternate_streams, is_admin, list_drives, long_path, open_in_explorer, security_info,
+    volume_info,
+};
+
+#[cfg(windows)]
+use win::{
+    delete_permanently as raw_delete_permanently, move_to_recycle_bin as raw_move_to_recycle_bin,
 };
 
 #[cfg(windows)]
@@ -39,9 +44,116 @@ pub(crate) use win::compressed_size;
 
 #[cfg(not(windows))]
 pub use stub::{
-    alternate_streams, delete_permanently, is_admin, list_drives, long_path, move_to_recycle_bin,
-    open_in_explorer, security_info, volume_info,
+    alternate_streams, is_admin, list_drives, long_path, open_in_explorer, security_info,
+    volume_info,
 };
+
+#[cfg(not(windows))]
+use stub::{
+    delete_permanently as raw_delete_permanently, move_to_recycle_bin as raw_move_to_recycle_bin,
+};
+
+// ---------------------------------------------------------------------------
+// Löschschutz im Löschweg (Defense in Depth, plattformneutral)
+// ---------------------------------------------------------------------------
+
+use crate::model::NodeFlags;
+use crate::protect::{NormEnv, ProtectEnv, ProtectError, Protection, classify_path_norm};
+use std::io;
+use std::sync::OnceLock;
+
+/// Schutz-Umgebung des laufenden Systems, einmalig aus [`ProtectEnv::from_system`].
+pub fn protect_env() -> &'static ProtectEnv {
+    static ENV: OnceLock<ProtectEnv> = OnceLock::new();
+    ENV.get_or_init(ProtectEnv::from_system)
+}
+
+/// Attribute und Ordner-Eigenschaft eines Pfads, soweit lesbar (sonst leer/Datei).
+fn path_facts(path: &str) -> (NodeFlags, bool) {
+    let Ok(md) = std::fs::symlink_metadata(long_path(path)) else {
+        return (NodeFlags::empty(), false);
+    };
+    let mut flags = NodeFlags::empty();
+    if md.file_type().is_symlink() {
+        flags |= NodeFlags::REPARSE;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let a = md.file_attributes();
+        if a & 0x2 != 0 {
+            flags |= NodeFlags::HIDDEN;
+        }
+        if a & 0x4 != 0 {
+            flags |= NodeFlags::SYSTEM;
+        }
+        if a & 0x400 != 0 {
+            flags |= NodeFlags::REPARSE;
+        }
+    }
+    if md.is_dir() {
+        flags |= NodeFlags::DIR;
+    }
+    (flags, md.is_dir())
+}
+
+/// Prüft alle Pfade, bevor irgendetwas gelöscht wird (alles oder nichts):
+/// Ist ein Pfad `Blocked`, endet der Aufruf mit `ErrorKind::PermissionDenied` und einer
+/// [`ProtectError`]-Nutzlast (Pfad, Grund, Anzahl). `Caution` ist erlaubt.
+pub fn guard_paths(paths: &[String], env: &ProtectEnv) -> io::Result<()> {
+    let ne = NormEnv::new(env);
+    let mut first: Option<ProtectError> = None;
+    let mut count = 0usize;
+    for p in paths {
+        let (flags, is_dir) = path_facts(p);
+        if let Protection::Blocked(reason) = classify_path_norm(p, flags, is_dir, &ne) {
+            count += 1;
+            if first.is_none() {
+                first = Some(ProtectError {
+                    path: p.clone(),
+                    reason,
+                    blocked_count: 0,
+                });
+            }
+        }
+    }
+    match first {
+        None => Ok(()),
+        Some(mut e) => {
+            e.blocked_count = count;
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, e))
+        }
+    }
+}
+
+/// Führt `op` nur aus, wenn [`guard_paths`] alle Pfade freigibt.
+pub fn guarded<F>(paths: &[String], env: &ProtectEnv, op: F) -> io::Result<()>
+where
+    F: FnOnce(&[String]) -> io::Result<()>,
+{
+    guard_paths(paths, env)?;
+    op(paths)
+}
+
+/// In den Papierkorb (nie endgültig), vorher Löschschutz-Prüfung für alle Pfade.
+pub fn move_to_recycle_bin(paths: &[String]) -> io::Result<()> {
+    move_to_recycle_bin_with_env(paths, protect_env())
+}
+
+/// Wie [`move_to_recycle_bin`], mit eigener Schutz-Umgebung (Tests).
+pub fn move_to_recycle_bin_with_env(paths: &[String], env: &ProtectEnv) -> io::Result<()> {
+    guarded(paths, env, raw_move_to_recycle_bin)
+}
+
+/// Endgültig löschen, vorher Löschschutz-Prüfung für alle Pfade.
+pub fn delete_permanently(paths: &[String]) -> io::Result<()> {
+    delete_permanently_with_env(paths, protect_env())
+}
+
+/// Wie [`delete_permanently`], mit eigener Schutz-Umgebung (Tests).
+pub fn delete_permanently_with_env(paths: &[String], env: &ProtectEnv) -> io::Result<()> {
+    guarded(paths, env, raw_delete_permanently)
+}
 
 // ---------------------------------------------------------------------------
 // Plattformneutrale Hilfslogik (auf Linux getestet)
@@ -237,5 +349,102 @@ mod stub {
 
     pub fn list_drives() -> Vec<String> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::protect::Reason;
+
+    fn temp_files() -> (tempfile::TempDir, Vec<String>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Lange Form (Windows-CI nutzt sonst evtl. 8.3-Kurznamen wie RUNNER~1).
+        let base = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let mut v = Vec::new();
+        for n in ["a.txt", "b.txt"] {
+            let p = base.join(n);
+            std::fs::write(&p, b"x").expect("write");
+            v.push(p.to_string_lossy().into_owned());
+        }
+        (dir, v)
+    }
+
+    fn exists(paths: &[String]) -> bool {
+        paths.iter().all(|p| std::path::Path::new(p).exists())
+    }
+
+    #[test]
+    fn mixed_batch_deletes_nothing() {
+        let env = ProtectEnv::windows_default();
+        let (_d, files) = temp_files();
+        let mut batch = files.clone();
+        batch.push(r"C:\Windows\System32".into());
+        batch.push(r"C:\pagefile.sys".into());
+        let mut ran = false;
+        let r = guarded(&batch, &env, |ps| {
+            ran = true;
+            for p in ps {
+                std::fs::remove_file(p)?;
+            }
+            Ok(())
+        });
+        let err = r.expect_err("muss abbrechen");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let pe = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<ProtectError>())
+            .expect("ProtectError");
+        assert_eq!(pe.reason, Reason::WindowsDir);
+        assert_eq!(pe.blocked_count, 2);
+        assert!(!ran);
+        assert!(exists(&files));
+        // Auch die echten Löschfunktionen brechen vor dem Plattform-Code ab.
+        for r in [
+            delete_permanently_with_env(&batch, &env),
+            move_to_recycle_bin_with_env(&batch, &env),
+        ] {
+            assert_eq!(
+                r.expect_err("abbruch").kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        assert!(exists(&files));
+    }
+
+    #[test]
+    fn free_batch_runs() {
+        let env = ProtectEnv::windows_default();
+        let (_d, files) = temp_files();
+        assert!(guard_paths(&files, &env).is_ok());
+        guarded(&files, &env, |ps| {
+            for p in ps {
+                std::fs::remove_file(p)?;
+            }
+            Ok(())
+        })
+        .expect("löschen");
+        assert!(files.iter().all(|p| !std::path::Path::new(p).exists()));
+        assert!(guard_paths(&[], &env).is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_classics() {
+        let env = ProtectEnv::windows_default();
+        for p in [
+            r"C:\",
+            r"\\?\C:\Windows",
+            r"c:/program files/x",
+            r"C:\Users",
+            r"C:\Users\joschy",
+            "relativ",
+            r"C:\Daten\..\Windows",
+        ] {
+            let e = guard_paths(&[p.to_string()], &env).expect_err(p);
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+            assert!(!e.to_string().is_empty());
+        }
+        assert!(guard_paths(&[r"C:\Windows.old".into()], &env).is_ok());
+        assert!(std::ptr::eq(protect_env(), protect_env()));
     }
 }
