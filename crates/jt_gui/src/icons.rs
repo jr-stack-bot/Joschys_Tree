@@ -196,6 +196,115 @@ pub fn corner_brackets(r: Rect, len: f32) -> [[Pos2; 2]; 8] {
     ]
 }
 
+/// Freistehendes Schloss, zentriert: Körper und Bügel (offener Linienzug).
+pub fn padlock(r: Rect) -> (Rect, [Pos2; 4]) {
+    let s = r.width().min(r.height());
+    let c = r.center();
+    let bw = s * 0.72;
+    let bh = s * 0.5;
+    let body = Rect::from_min_max(
+        pos2(c.x - bw * 0.5, r.center().y + s * 0.5 - bh),
+        pos2(c.x + bw * 0.5, r.center().y + s * 0.5),
+    );
+    let i = bw * 0.2;
+    let top = c.y - s * 0.5 + 0.5;
+    (
+        body,
+        [
+            pos2(body.left() + i, body.top()),
+            pos2(body.left() + i, top),
+            pos2(body.right() - i, top),
+            pos2(body.right() - i, body.top()),
+        ],
+    )
+}
+
+/// Warndreieck: Umriss (3 Punkte), Ausrufestrich und Punkt.
+pub fn warning(r: Rect) -> ([Pos2; 3], [Pos2; 2], Rect) {
+    let s = r.width().min(r.height());
+    let c = r.center();
+    let h = s * 0.9;
+    let top = c.y - h * 0.5;
+    let bot = c.y + h * 0.5;
+    let tri = [
+        pos2(c.x, top),
+        pos2(c.x + s * 0.5, bot),
+        pos2(c.x - s * 0.5, bot),
+    ];
+    let bar = [pos2(c.x, top + h * 0.33), pos2(c.x, top + h * 0.66)];
+    let d = (s * 0.12).max(1.0);
+    let dot = Rect::from_center_size(pos2(c.x, top + h * 0.82), vec2(d, d));
+    (tri, bar, dot)
+}
+
+/// Korb: Körper (Trapez, oben breiter), Rand oben, Henkel (offener Linienzug).
+pub fn basket(r: Rect) -> ([Pos2; 4], [Pos2; 2], [Pos2; 4]) {
+    let s = r.width().min(r.height());
+    let c = r.center();
+    let l = c.x - s * 0.5;
+    let rt = c.x + s * 0.5;
+    let rim = c.y - s * 0.05;
+    let b = c.y + s * 0.5;
+    let inset = s * 0.14;
+    let body = [
+        pos2(l, rim),
+        pos2(rt, rim),
+        pos2(rt - inset, b),
+        pos2(l + inset, b),
+    ];
+    let handle = [
+        pos2(l + s * 0.22, rim),
+        pos2(l + s * 0.34, c.y - s * 0.5 + 0.5),
+        pos2(rt - s * 0.34, c.y - s * 0.5 + 0.5),
+        pos2(rt - s * 0.22, rim),
+    ];
+    (body, [body[0], body[1]], handle)
+}
+
+/// Besen: Stiel (Linie), Kopf (Viereck) und drei Borstenstriche.
+pub fn broom(r: Rect) -> ([Pos2; 2], [Pos2; 4], [[Pos2; 2]; 3]) {
+    let s = r.width().min(r.height());
+    let o = r.center() - vec2(s * 0.5, s * 0.5);
+    let p = |x: f32, y: f32| pos2(o.x + x * s, o.y + y * s);
+    let stick = [p(0.95, 0.05), p(0.5, 0.5)];
+    let head = [p(0.38, 0.42), p(0.58, 0.62), p(0.36, 0.95), p(0.05, 0.64)];
+    let bristles = [
+        [p(0.3, 0.6), p(0.14, 0.76)],
+        [p(0.4, 0.68), p(0.24, 0.86)],
+        [p(0.48, 0.76), p(0.36, 0.92)],
+    ];
+    (stick, head, bristles)
+}
+
+/// Kleiner Winkel nach rechts (Brotkrumen-Trenner), offener Linienzug.
+pub fn chevron(c: Pos2, size: f32) -> [Pos2; 3] {
+    let h = size * 0.5;
+    let w = size * 0.25;
+    [
+        pos2(c.x - w, c.y - h),
+        pos2(c.x + w, c.y),
+        pos2(c.x - w, c.y + h),
+    ]
+}
+
+/// Diagonale Schraffur (Linien x + y = k) innerhalb von `r`, Abstand `spacing`.
+/// Die Linien liegen auf einem festen Raster, damit benachbarte Kacheln passen.
+pub fn hatch_lines(r: Rect, spacing: f32, mut f: impl FnMut([Pos2; 2])) {
+    if spacing <= 0.5 || r.width() <= 0.0 || r.height() <= 0.0 {
+        return;
+    }
+    let mut k = ((r.left() + r.top()) / spacing).ceil() * spacing;
+    let end = r.right() + r.bottom();
+    while k < end {
+        let x1 = r.left().max(k - r.bottom());
+        let x2 = r.right().min(k - r.top());
+        if x2 > x1 {
+            f([pos2(x1, k - x1), pos2(x2, k - x2)]);
+        }
+        k += spacing;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Zeichnen
 
@@ -302,6 +411,65 @@ pub fn paint_corner_brackets(p: &Painter, r: Rect, len: f32, stroke: Stroke) {
     for l in corner_brackets(r, len) {
         p.line_segment(l, stroke);
     }
+}
+
+/// Freistehendes Schloss.
+pub fn paint_padlock(p: &Painter, r: Rect, color: Color32) {
+    let (body, shackle) = padlock(r);
+    p.rect_filled(body, 0.0, color);
+    open(
+        p,
+        &shackle,
+        Stroke::new((r.height() * 0.12).clamp(1.0, 2.0), color),
+    );
+}
+
+/// Warndreieck (Umriss, Ausrufezeichen gezeichnet).
+pub fn paint_warning(p: &Painter, r: Rect, color: Color32) {
+    let (tri, bar, dot) = warning(r);
+    let w = (r.height() * 0.11).clamp(1.0, 2.0);
+    closed(p, &tri, Stroke::new(w, color));
+    p.line_segment(bar, Stroke::new(w, color));
+    p.rect_filled(dot, 0.0, color);
+}
+
+/// Korb-Symbol.
+pub fn paint_basket(p: &Painter, r: Rect, color: Color32) {
+    let (body, rim, handle) = basket(r);
+    let s = Stroke::new((r.height() * 0.1).clamp(1.0, 2.0), color);
+    closed(p, &body, s);
+    p.line_segment(rim, Stroke::new(s.width + 0.5, color));
+    open(p, &handle, s);
+    // Flechtmuster: zwei senkrechte Striche im Körper.
+    let (a, b) = (body[0], body[3]);
+    let (c, d) = (body[1], body[2]);
+    for t in [0.36_f32, 0.64] {
+        let top = pos2(a.x + (c.x - a.x) * t, a.y);
+        let bot = pos2(b.x + (d.x - b.x) * t, b.y);
+        p.line_segment([top, bot], Stroke::new(1.0, color));
+    }
+}
+
+/// Besen-Symbol.
+pub fn paint_broom(p: &Painter, r: Rect, color: Color32) {
+    let (stick, head, bristles) = broom(r);
+    let w = (r.height() * 0.1).clamp(1.0, 2.0);
+    p.line_segment(stick, Stroke::new(w, color));
+    closed(p, &head, Stroke::new(w, color));
+    for b in bristles {
+        p.line_segment(b, Stroke::new(1.0, color));
+    }
+}
+
+pub fn paint_chevron(p: &Painter, c: Pos2, size: f32, stroke: Stroke) {
+    open(p, &chevron(c, size), stroke);
+}
+
+/// Schraffur zeichnen.
+pub fn paint_hatch(p: &Painter, r: Rect, spacing: f32, stroke: Stroke) {
+    hatch_lines(r, spacing, |l| {
+        p.line_segment(l, stroke);
+    });
 }
 
 #[cfg(test)]
@@ -425,6 +593,57 @@ mod tests {
         assert!(corner_wedge(r).iter().all(|p| inside(r, *p)));
         let br = corner_brackets(r, 4.0);
         assert!(br.iter().flatten().all(|p| inside(r, *p)));
+    }
+
+    #[test]
+    fn new_symbols_stay_in_rect() {
+        let r = sq();
+        let (body, shackle) = padlock(r);
+        assert!(inside(r, body.min) && inside(r, body.max));
+        assert!(shackle.iter().all(|p| inside(r, *p)));
+        assert!(shackle[1].y < body.top(), "Bügel über dem Körper");
+        let (tri, bar, dot) = warning(r);
+        assert!(tri.iter().chain(bar.iter()).all(|p| inside(r, *p)));
+        assert!(inside(r, dot.min) && inside(r, dot.max));
+        assert!(tri[0].y < tri[1].y && tri[1].y == tri[2].y, "Spitze oben");
+        assert!(bar[1].y < dot.top(), "Punkt unter dem Strich");
+        let (body, rim, handle) = basket(r);
+        assert!(
+            body.iter()
+                .chain(rim.iter())
+                .chain(handle.iter())
+                .all(|p| inside(r, *p))
+        );
+        assert!(
+            body[1].x - body[0].x > body[2].x - body[3].x,
+            "oben breiter"
+        );
+        assert!(handle[1].y < rim[0].y, "Henkel über dem Rand");
+        let (stick, head, bristles) = broom(r);
+        assert!(stick.iter().chain(head.iter()).all(|p| inside(r, *p)));
+        assert!(bristles.iter().flatten().all(|p| inside(r, *p)));
+        assert!(chevron(r.center(), 8.0).iter().all(|p| inside(r, *p)));
+        let ch = chevron(pos2(0.0, 0.0), 8.0);
+        assert!(ch[1].x > ch[0].x && ch[0].x == ch[2].x, "zeigt nach rechts");
+    }
+
+    #[test]
+    fn hatch_covers_rect_diagonally() {
+        let r = Rect::from_min_size(pos2(10.0, 10.0), vec2(40.0, 20.0));
+        let mut lines = Vec::new();
+        hatch_lines(r, 6.0, |l| lines.push(l));
+        // (40 + 20) / 6 = 10 Linien
+        assert!((9..=11).contains(&lines.len()), "{}", lines.len());
+        for [a, b] in &lines {
+            assert!(inside(r, *a) && inside(r, *b));
+            // 45 Grad: x + y konstant
+            assert!(((a.x + a.y) - (b.x + b.y)).abs() < 0.01);
+            assert!(((a.x + a.y) / 6.0).fract().abs() < 0.01, "festes Raster");
+        }
+        let mut n = 0;
+        hatch_lines(Rect::NOTHING, 6.0, |_| n += 1);
+        hatch_lines(r, 0.0, |_| n += 1);
+        assert_eq!(n, 0);
     }
 
     #[test]

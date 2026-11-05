@@ -3,12 +3,17 @@
 
 use eframe::egui::{self, Align2, Rect, Sense, Stroke, StrokeKind, Ui, pos2};
 use jt_core::format::bytes;
+use jt_core::protect::Protection;
 use jt_core::{Key, NO_NODE, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, fill};
 use crate::icons;
+use crate::safety::ProtCache;
+use crate::settings::TreemapColor;
 use crate::theme::{self, FileCat, Theme, readable_on, with_alpha};
-use crate::views::{cell, no_tree};
+use crate::views::{
+    MenuFrom, age_days, cell, fill_n, fmt_percent, lock_color, no_tree, node_menu, prot_text,
+};
 use crate::widgets;
 
 /// Kacheln unter dieser Kantenlänge werden nicht weiter unterteilt.
@@ -114,6 +119,10 @@ struct Tile {
     id: NodeId,
     rect: Rect,
     depth: u32,
+    prot: Protection,
+    /// Oberste gesperrte Kachel eines vererbend gesperrten Bereichs (oder gesperrte
+    /// Datei): bekommt Abdunklung und Schraffur.
+    hatch: bool,
 }
 
 #[derive(Default)]
@@ -122,6 +131,8 @@ pub struct TreemapState {
     pub root: NodeId,
     tiles: Vec<Tile>,
     built_for: Option<(u64, NodeId, Rect)>,
+    /// Kachel, für die das Kontextmenü offen ist.
+    menu_target: Option<NodeId>,
 }
 
 impl TreemapState {
@@ -129,25 +140,49 @@ impl TreemapState {
         self.built_for = None;
     }
 
-    fn rebuild(&mut self, tree: &Tree, rect: Rect, gen_: u64) {
+    /// Layout neu berechnen; Schutzstufen nur für die gezeichneten Kacheln (Cache).
+    fn rebuild(&mut self, tree: &Tree, rect: Rect, gen_: u64, prot: &mut ProtCache) {
         self.tiles.clear();
-        layout_rec(tree, self.root, rect, 0, &mut self.tiles);
+        let base = prot.protection(tree, self.root);
+        layout_rec(tree, self.root, rect, 0, base, &mut self.tiles, prot);
         self.built_for = Some((gen_, self.root, rect));
     }
 }
 
-fn layout_rec(tree: &Tree, dir: NodeId, rect: Rect, depth: u32, out: &mut Vec<Tile>) {
+fn layout_rec(
+    tree: &Tree,
+    dir: NodeId,
+    rect: Rect,
+    depth: u32,
+    parent_prot: Protection,
+    out: &mut Vec<Tile>,
+    prot: &mut ProtCache,
+) {
     let items: Vec<(NodeId, u64)> = tree
         .children(dir)
         .map(|c| (c, tree.node(c).size))
         .filter(|(_, s)| *s > 0)
         .collect();
+    let parent_inherits = matches!(parent_prot, Protection::Blocked(r) if r.is_inherited());
     for (id, r) in squarify(&items, rect) {
         if out.len() >= MAX_TILES {
             return;
         }
-        out.push(Tile { id, rect: r, depth });
+        let p = if parent_inherits {
+            parent_prot
+        } else {
+            prot.protection(tree, id)
+        };
         let n = tree.node(id);
+        let hatch = !parent_inherits
+            && matches!(p, Protection::Blocked(reason) if reason.is_inherited() || !n.is_dir());
+        out.push(Tile {
+            id,
+            rect: r,
+            depth,
+            prot: p,
+            hatch,
+        });
         if n.is_dir()
             && depth < MAX_DEPTH
             && r.width() > MIN_SPLIT
@@ -157,8 +192,33 @@ fn layout_rec(tree: &Tree, dir: NodeId, rect: Rect, depth: u32, out: &mut Vec<Ti
                 pos2(r.min.x + 1.0, r.min.y + HEADER),
                 pos2(r.max.x - 1.0, r.max.y - 1.0),
             );
-            layout_rec(tree, id, inner, depth + 1, out);
+            layout_rec(tree, id, inner, depth + 1, p, out, prot);
         }
+    }
+}
+
+/// Höhe der Legende unter der Treemap.
+const LEGEND_H: f32 = 20.0;
+
+/// Kachelfarbe je Farbmodus.
+fn tile_fill(
+    th: &Theme,
+    mode: TreemapColor,
+    tree: &Tree,
+    t: &Tile,
+    now: jt_core::FileTime,
+) -> (egui::Color32, egui::Color32) {
+    match mode {
+        TreemapColor::FileType => {
+            let cat = FileCat::from_ext(tree.ext_of(t.id));
+            (cat.tile(th), cat.color())
+        }
+        TreemapColor::Age => {
+            let f = theme::age_frac(age_days(tree.node(t.id), now));
+            let c = f.map_or(FileCat::Other.color(), |f| theme::age_color(th, f));
+            (theme::age_tile(th, f), c)
+        }
+        TreemapColor::Protection => (theme::prot_tile(th, t.prot), theme::prot_color(th, t.prot)),
     }
 }
 
@@ -168,26 +228,97 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         no_tree(ui, lang);
         return;
     };
-    let tm = &mut state.treemap;
-    if tm.root as usize >= tree.nodes.len() {
-        tm.root = 0;
+    if state.treemap.root as usize >= tree.nodes.len() {
+        state.treemap.root = 0;
     }
     let th = Theme::of(ui);
+    let mut mode = state.settings.treemap_color;
+    // Kopfzeile: Brotkrumen (anklickbar) links, Farbmodus rechts.
+    let mut jump: Option<NodeId> = None;
     ui.horizontal(|ui| {
+        let tm = &state.treemap;
+        let mut chain = vec![tm.root];
+        let mut p = tree.node(tm.root).parent;
+        while p != NO_NODE {
+            chain.push(p);
+            p = tree.node(p).parent;
+        }
+        chain.reverse();
         let parent = tree.node(tm.root).parent;
         if widgets::tool_button(ui, tr(lang, Key::TreemapZoomOut), parent != NO_NODE).clicked() {
-            tm.root = parent;
+            jump = Some(parent);
         }
-        cell(ui, tree.full_path(tm.root), th.text);
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.x = 2.0;
+        // Sehr tiefe Pfade: Anfang, Auslassung, die letzten Ebenen.
+        const KEEP: usize = 6;
+        let skip = chain.len().saturating_sub(KEEP + 1);
+        for (i, &id) in chain.iter().enumerate() {
+            if i > 0 && i <= skip {
+                if i == 1 {
+                    cell(ui, '\u{2026}'.to_string(), th.dim);
+                }
+                continue;
+            }
+            if i > 0 {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), Sense::hover());
+                icons::paint_chevron(ui.painter(), r.center(), 8.0, Stroke::new(1.2, th.dim));
+            }
+            let last = i + 1 == chain.len();
+            let name = tree.node(id).name.to_string();
+            let color = if last { th.accent_text } else { th.text };
+            let r = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(name)
+                        .color(color)
+                        .font(widgets::mono(12.0)),
+                )
+                .sense(if last { Sense::hover() } else { Sense::click() })
+                .selectable(false),
+            );
+            if !last && r.hovered() {
+                ui.painter().hline(
+                    r.rect.x_range(),
+                    r.rect.bottom(),
+                    Stroke::new(1.0, th.accent),
+                );
+            }
+            if r.clicked() {
+                jump = Some(id);
+            }
+        }
+        ui.add_space(8.0);
         cell(ui, bytes(tree.node(tm.root).size, lang), th.accent_text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (m, k) in [
+                (TreemapColor::Protection, Key::TmColorProt),
+                (TreemapColor::Age, Key::TmColorAge),
+                (TreemapColor::FileType, Key::TmColorType),
+            ] {
+                widgets::choice(ui, &mut mode, m, tr(lang, k));
+            }
+            cell(ui, tr(lang, Key::TmColorBy), th.dim);
+        });
     });
+    if let Some(j) = jump {
+        state.treemap.root = j;
+    }
+    if mode != state.settings.treemap_color {
+        state.settings.treemap_color = mode;
+        state.save_settings();
+    }
     ui.add_space(2.0);
-    let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click());
+    let avail = ui.available_size() - egui::vec2(0.0, LEGEND_H + 4.0);
+    let (resp, painter) = ui.allocate_painter(avail.max(egui::vec2(10.0, 10.0)), Sense::click());
     let outer = resp.rect;
     painter.rect_filled(outer, 0.0, th.panel);
     let rect = outer.shrink(3.0);
-    if tm.built_for != Some((state.tree_gen, tm.root, rect)) {
-        tm.rebuild(&tree, rect, state.tree_gen);
+    let gen_ = state.tree_gen;
+    let now = state.now;
+    let selected = state.selected;
+    let tm = &mut state.treemap;
+    if tm.built_for != Some((gen_, tm.root, rect)) {
+        tm.rebuild(&tree, rect, gen_, &mut state.prot);
     }
     if tm.tiles.is_empty() {
         painter.text(
@@ -197,6 +328,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             widgets::title_font(15.0),
             th.text2,
         );
+        legend(ui, mode, lang);
         return;
     }
     let font = widgets::mono(11.0);
@@ -206,8 +338,22 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             // Ordner: nur Kontur und Kopfzeile, damit die Dateien dominieren.
             painter.rect_stroke(t.rect, 0.0, Stroke::new(1.0, th.line), StrokeKind::Inside);
             if t.rect.width() > 40.0 && t.rect.height() > HEADER {
+                let mut x = 4.0;
+                let icon =
+                    Rect::from_min_size(t.rect.min + egui::vec2(3.0, 2.0), egui::vec2(10.0, 10.0));
+                match t.prot {
+                    Protection::Blocked(_) => {
+                        icons::paint_padlock(&painter, icon, lock_color(th));
+                        x = 15.0;
+                    }
+                    Protection::Caution(_) => {
+                        icons::paint_warning(&painter, icon, th.warn);
+                        x = 15.0;
+                    }
+                    Protection::Free => {}
+                }
                 painter.with_clip_rect(t.rect.shrink(1.0)).text(
-                    t.rect.min + egui::vec2(4.0, 1.0),
+                    t.rect.min + egui::vec2(x, 1.0),
                     Align2::LEFT_TOP,
                     &n.name,
                     font.clone(),
@@ -215,12 +361,11 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 );
             }
         } else {
-            let cat = FileCat::from_ext(tree.ext_of(t.id));
-            let fill = cat.tile(th);
+            let (fill, edge_c) = tile_fill(th, mode, &tree, t, now);
             painter.rect_filled(t.rect, 0.0, fill);
             if t.rect.width() >= 3.0 && t.rect.height() >= 3.0 {
                 let edge = if th.dark {
-                    with_alpha(cat.color(), 170)
+                    with_alpha(edge_c, 170)
                 } else {
                     with_alpha(th.panel, 200)
                 };
@@ -235,9 +380,53 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     readable_on(fill),
                 );
             }
+            if t.prot.is_caution() && t.rect.width() > 26.0 && t.rect.height() > 26.0 {
+                let ir = Rect::from_min_size(
+                    pos2(t.rect.right() - 15.0, t.rect.bottom() - 14.0),
+                    egui::vec2(12.0, 11.0),
+                );
+                icons::paint_warning(&painter, ir, th.warn);
+            }
         }
     }
-    let hovered_tile = resp.hover_pos().and_then(|p| deepest_at(&tm.tiles, p));
+    // Gesperrte Bereiche: abdunkeln, schraffieren, Schloss.
+    let (shade, hatch) = theme::hatch_colors(th);
+    for t in tm.tiles.iter().filter(|t| t.hatch) {
+        let r = if tree.node(t.id).is_dir() {
+            Rect::from_min_max(pos2(t.rect.min.x, t.rect.min.y + HEADER), t.rect.max)
+        } else {
+            t.rect
+        };
+        painter.rect_filled(r, 0.0, shade);
+        icons::paint_hatch(&painter.with_clip_rect(r), r, 7.0, Stroke::new(1.0, hatch));
+        if r.width() > 30.0 && r.height() > 30.0 {
+            let s = (r.width().min(r.height()) * 0.3).clamp(12.0, 28.0);
+            let lr = Rect::from_center_size(r.center(), egui::vec2(s, s));
+            painter.rect_filled(lr.expand(4.0), 0.0, with_alpha(th.panel, 210));
+            icons::paint_padlock(&painter, lr, lock_color(th));
+        }
+    }
+    // Korb-Elemente: gestrichelter Akzentrahmen (vier Ecken) und Korb-Symbol.
+    for t in tm.tiles.iter().filter(|t| state.basket.contains(t.id)) {
+        painter.rect_stroke(
+            t.rect.shrink(1.0),
+            0.0,
+            Stroke::new(1.5, th.accent),
+            StrokeKind::Inside,
+        );
+        if t.rect.width() > 20.0 && t.rect.height() > 20.0 {
+            let br = Rect::from_min_size(
+                pos2(t.rect.right() - 16.0, t.rect.top() + 2.0),
+                egui::vec2(13.0, 13.0),
+            );
+            painter.rect_filled(br.expand(1.0), 0.0, with_alpha(th.panel, 220));
+            icons::paint_basket(&painter, br, th.accent);
+        }
+    }
+    let hovered_tile = resp
+        .hover_pos()
+        .and_then(|p| deepest_at(&tm.tiles, p))
+        .copied();
     if let Some(t) = hovered_tile {
         if th.glow && theme::effects(ui) {
             widgets::glow(&painter, t.rect, th.accent, 1.0);
@@ -245,7 +434,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         painter.rect_stroke(t.rect, 0.0, Stroke::new(2.0, th.accent), StrokeKind::Inside);
     }
     // Hervorhebung der Auswahl
-    if let Some(sel) = state.selected
+    if let Some(sel) = selected
         && let Some(t) = tm.tiles.iter().find(|t| t.id == sel)
     {
         painter.rect_stroke(
@@ -262,33 +451,188 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         );
     }
     icons::paint_corner_brackets(&painter, outer, 14.0, Stroke::new(2.0, th.accent));
-    let hovered = hovered_tile.map(|t| t.id);
-    if let Some(id) = hovered {
-        let n = tree.node(id);
-        let tip = fill(
-            tr(lang, Key::TreemapTooltip),
-            &[
-                ("{name}", &tree.full_path(id)),
-                ("{size}", &bytes(n.size, lang)),
-            ],
-        );
+    if let Some(t) = hovered_tile
+        && !egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp))
+    {
+        let tip = tooltip(&tree, tm.root, t.id, t.prot, now, lang);
         resp.clone().on_hover_text_at_pointer(tip);
     }
-    if resp.clicked()
+    let hovered = hovered_tile.map(|t| t.id);
+    if resp.double_clicked() {
+        // Hineinzoomen: in den obersten Ordner unter dem Zoom-Knoten, der den Treffer enthält.
+        if let Some(id) = hovered
+            && let Some(z) = zoom_target(&tree, tm.root, id)
+        {
+            tm.root = z;
+        }
+    } else if resp.clicked()
         && let Some(id) = hovered
     {
-        state.actions.push(Action::Select(id));
-        // Hineinzoomen: in den obersten Ordner unter dem Zoom-Knoten, der den Treffer enthält.
-        if let Some(z) = zoom_target(&tree, tm.root, id) {
-            tm.root = z;
+        if ui.input(|i| i.modifiers.command) {
+            state.actions.push(Action::ToggleBasket(id));
+        } else {
+            state.actions.push(Action::Select(id));
         }
     }
     if resp.secondary_clicked() {
-        let p = tree.node(tm.root).parent;
-        if p != NO_NODE {
-            tm.root = p;
+        tm.menu_target = hovered;
+        if let Some(id) = hovered {
+            state.actions.push(Action::Select(id));
         }
     }
+    let target = tm.menu_target;
+    let mut cx = crate::menu_cx!(state, &tree);
+    resp.context_menu(|ui| {
+        if let Some(id) = target {
+            node_menu(ui, &mut cx, id, MenuFrom::Treemap);
+        }
+    });
+    legend(ui, mode, lang);
+}
+
+/// Mehrzeiliger Tooltip: Pfad, Größe mit Anteil an der Ansicht, Alter, Schutz.
+fn tooltip(
+    tree: &Tree,
+    view: NodeId,
+    id: NodeId,
+    prot: Protection,
+    now: jt_core::FileTime,
+    lang: jt_core::Lang,
+) -> String {
+    let n = tree.node(id);
+    let total = tree.node(view).size.max(1);
+    let share = fmt_percent((n.size as f64 / total as f64) as f32, lang);
+    let age = match age_days(n, now) {
+        Some(d) => fill_n(tr(lang, Key::AgeDays), d),
+        None => tr(lang, Key::Unknown).to_string(),
+    };
+    let level = match prot.reason() {
+        Some(r) => prot_text(prot, r, lang),
+        None => tr(lang, prot.level_key()).to_string(),
+    };
+    let lines = [
+        tree.full_path(id),
+        fill(
+            tr(lang, Key::TmTipSize),
+            &[("{size}", &bytes(n.size, lang)), ("{share}", &share)],
+        ),
+        fill(tr(lang, Key::TmTipAge), &[("{age}", &age)]),
+        fill(tr(lang, Key::TmTipProt), &[("{level}", &level)]),
+    ];
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(l);
+    }
+    out
+}
+
+/// Legende passend zum Farbmodus, plus Bedienhinweis rechts.
+fn legend(ui: &mut Ui, mode: TreemapColor, lang: jt_core::Lang) {
+    let th = Theme::of(ui);
+    ui.add_space(2.0);
+    let small = |ui: &mut Ui, text: &str, c: egui::Color32| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(c).font(widgets::mono(11.0)))
+                .selectable(false),
+        );
+    };
+    let row = ui.horizontal(|ui| {
+        ui.set_height(LEGEND_H);
+        ui.spacing_mut().item_spacing.x = 3.0;
+        // Schutz-Markierungen gelten in allen Modi.
+        let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 11.0), Sense::hover());
+        let (shade, hatch) = theme::hatch_colors(th);
+        ui.painter().rect_filled(r, 0.0, th.row);
+        ui.painter().rect_filled(r, 0.0, shade);
+        icons::paint_hatch(
+            &ui.painter().with_clip_rect(r),
+            r,
+            4.0,
+            Stroke::new(1.0, hatch),
+        );
+        let (ir, _) = ui.allocate_exact_size(egui::vec2(10.0, 11.0), Sense::hover());
+        icons::paint_padlock(ui.painter(), ir, lock_color(th));
+        small(ui, tr(lang, Key::ProtLevelBlocked), th.text2);
+        ui.add_space(4.0);
+        let (ir, _) = ui.allocate_exact_size(egui::vec2(11.0, 11.0), Sense::hover());
+        icons::paint_warning(ui.painter(), ir, th.warn);
+        small(ui, tr(lang, Key::ProtLevelCaution), th.text2);
+        let (r, _) = ui.allocate_exact_size(egui::vec2(13.0, 12.0), Sense::hover());
+        ui.painter().vline(
+            r.center().x.round() + 0.5,
+            r.y_range(),
+            Stroke::new(1.0, th.line),
+        );
+        let swatch = |ui: &mut Ui, c: egui::Color32, text: &str| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), Sense::hover());
+            ui.painter().rect_filled(r, 0.0, c);
+            small(ui, text, th.text2);
+            ui.add_space(3.0);
+        };
+        match mode {
+            TreemapColor::FileType => {
+                for c in FileCat::ALL {
+                    swatch(ui, c.tile(th), tr(lang, c.label_key()));
+                }
+            }
+            TreemapColor::Age => {
+                small(ui, tr(lang, Key::TmLegendNew), th.text2);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(140.0, 9.0), Sense::hover());
+                let half = Rect::from_min_size(r.min, egui::vec2(r.width() * 0.5, r.height()));
+                widgets::paint_gradient(
+                    ui.painter(),
+                    half,
+                    theme::age_tile(th, Some(0.0)),
+                    theme::age_tile(th, Some(0.5)),
+                );
+                widgets::paint_gradient(
+                    ui.painter(),
+                    half.translate(egui::vec2(r.width() * 0.5, 0.0)),
+                    theme::age_tile(th, Some(0.5)),
+                    theme::age_tile(th, Some(1.0)),
+                );
+                small(ui, tr(lang, Key::TmLegendOld), th.text2);
+                ui.add_space(6.0);
+                swatch(ui, theme::age_tile(th, None), tr(lang, Key::Unknown));
+            }
+            TreemapColor::Protection => {
+                use jt_core::protect::Reason;
+                swatch(
+                    ui,
+                    theme::prot_tile(th, Protection::Free),
+                    tr(lang, Key::ProtLevelFree),
+                );
+                swatch(
+                    ui,
+                    theme::prot_tile(th, Protection::Caution(Reason::AppData)),
+                    tr(lang, Key::ProtLevelCaution),
+                );
+                swatch(
+                    ui,
+                    theme::prot_tile(th, Protection::Blocked(Reason::WindowsDir)),
+                    tr(lang, Key::ProtLevelBlocked),
+                );
+            }
+        }
+        // Bedienhinweis rechts, gekürzt, wenn der Platz nicht reicht.
+        if ui.available_width() > 60.0 {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(tr(lang, Key::TmHint))
+                            .color(th.dim)
+                            .font(widgets::mono(11.0)),
+                    )
+                    .truncate()
+                    .selectable(false),
+                );
+            });
+        }
+    });
+    row.response.on_hover_text(tr(lang, Key::TmHint));
 }
 
 /// Tiefste Kachel unter dem Punkt (Kacheln liegen in Zeichenreihenfolge, Kinder nach Eltern).

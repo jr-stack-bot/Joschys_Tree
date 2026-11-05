@@ -3,12 +3,14 @@
 
 use eframe::egui::{self, Align2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use jt_core::format::{bytes, number};
-use jt_core::{Key, Lang, NodeFlags, NodeId, tr};
+use jt_core::protect::Protection;
+use jt_core::{Key, Lang, NodeFlags, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, DetailInfo};
 use crate::icons::{self, NodeIcon};
+use crate::safety::Decision;
 use crate::theme::{self, FileCat, Theme, with_alpha};
-use crate::views::{cell, fmt_percent, fmt_time, frac_of_parent};
+use crate::views::{cell, fmt_percent, fmt_time, frac_of_parent, lock_color};
 use crate::widgets;
 
 #[derive(Default)]
@@ -121,6 +123,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                 widgets::title_font(26.0),
                 t,
             );
+            prot_line(ui, lang, state, &tree, id);
             widgets::section(ui, tr(lang, Key::DetTitle), t.accent);
             egui::Grid::new("jt_details_grid")
                 .num_columns(2)
@@ -180,6 +183,59 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             ui.add_space(6.0);
             lazy_part(ui, lang, state, id);
         });
+}
+
+/// Schutzstufe mit Symbol und Begründung, dazu der Korb-Knopf.
+fn prot_line(ui: &mut Ui, lang: Lang, state: &mut AppState, tree: &Tree, id: NodeId) {
+    let t = Theme::of(ui);
+    let prot = state.prot.protection(tree, id);
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+        let r = r.shrink(1.0);
+        let color = match prot {
+            Protection::Free => {
+                ui.painter().rect_filled(r.shrink(2.0), 0.0, t.ok);
+                t.ok
+            }
+            Protection::Caution(_) => {
+                icons::paint_warning(ui.painter(), r, t.warn);
+                t.warn
+            }
+            Protection::Blocked(_) => {
+                icons::paint_padlock(ui.painter(), r, lock_color(t));
+                lock_color(t)
+            }
+        };
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(tr(lang, prot.level_key()))
+                    .color(color)
+                    .strong(),
+            )
+            .selectable(false),
+        );
+    });
+    if let Some(reason) = prot.reason() {
+        ui.add(egui::Label::new(egui::RichText::new(reason.text(lang)).color(t.text2)).wrap());
+    }
+    if state.basket.contains(id) {
+        if widgets::tool_button(ui, tr(lang, Key::CtxRemoveBasket), true).clicked() {
+            state.actions.push(Action::RemoveBasket(id));
+        }
+    } else {
+        let covered = state.basket.covered_by_ancestor(tree, id);
+        let d = state.prot.basket_decision(tree, id);
+        let r = widgets::tool_button(ui, tr(lang, Key::CtxAddBasket), d.is_allowed() && !covered);
+        let r = match d {
+            _ if covered => r.on_hover_text(tr(lang, Key::BasketCovered)),
+            Decision::Denied(x) => r.on_hover_text(x.text(lang)),
+            _ => r,
+        };
+        if r.clicked() {
+            state.actions.push(Action::AddBasket(vec![id]));
+        }
+    }
+    ui.add_space(4.0);
 }
 
 /// Owner/ACL/ADS werden erst auf Knopfdruck im Hintergrund geladen.

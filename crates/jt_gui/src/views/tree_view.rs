@@ -99,7 +99,6 @@ impl TreeViewState {
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     let lang = state.lang();
-    let allow_delete = state.deletion_allowed();
     let Some(tree) = state.tree.clone() else {
         no_tree(ui, lang);
         return;
@@ -114,7 +113,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         .and_then(|id| tv.rows.iter().position(|(r, _)| *r == id));
     let now = state.now;
     let selected = state.selected;
-    let actions = &mut state.actions;
+    let mut cx = crate::menu_cx!(state, &tree);
     let mut toggles: Vec<NodeId> = Vec::new();
     let mut sort_click: Option<SortKey> = None;
     let (sort, desc) = (tv.sort, tv.desc);
@@ -222,6 +221,8 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                             locked,
                         );
                     }
+                    let prot = cx.prot.protection(&tree, id);
+                    crate::views::prot_badge(ui, prot, cx.basket.contains(id), lang);
                     cell(ui, &*n.name, main);
                 });
                 row.col(|ui| {
@@ -266,14 +267,14 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     toggles.push(id);
                 }
                 if resp.clicked() {
-                    actions.push(Action::Select(id));
+                    if resp.ctx.input(|i| i.modifiers.command) {
+                        cx.actions.push(Action::ToggleBasket(id));
+                    } else {
+                        cx.actions.push(Action::Select(id));
+                    }
                 }
                 resp.context_menu(|ui| {
-                    if n.is_dir() && ui.button(tr(lang, Key::CtxShowInTreemap)).clicked() {
-                        actions.push(Action::ShowInTreemap(id));
-                        ui.close();
-                    }
-                    crate::views::node_menu(ui, lang, &tree, id, actions, false, allow_delete);
+                    crate::views::node_menu(ui, &mut cx, id, crate::views::MenuFrom::Tree);
                 });
             });
         });

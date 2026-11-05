@@ -47,6 +47,14 @@ pub struct Theme {
     pub crit_hi: Color32,
     pub ok: Color32,
     pub err: Color32,
+    /// Treemap-Farbmodus "Alter": neu, mittel, alt.
+    pub age_new: Color32,
+    pub age_mid: Color32,
+    pub age_old: Color32,
+    /// Schutzstufen: Frei, Vorsicht, Gesperrt.
+    pub prot_free: Color32,
+    pub prot_caution: Color32,
+    pub prot_blocked: Color32,
     /// Leucht-Effekte (nur dunkel sinnvoll).
     pub glow: bool,
 }
@@ -82,6 +90,12 @@ pub const DARK: Theme = Theme {
     crit_hi: rgb(0xff7d13),
     ok: rgb(0x00ff9d),
     err: rgb(0xff5c7a),
+    age_new: rgb(0x00ff9d),
+    age_mid: rgb(0xffd000),
+    age_old: rgb(0xff3b30),
+    prot_free: rgb(0x00e08a),
+    prot_caution: rgb(0xffb000),
+    prot_blocked: rgb(0x8a5a60),
     glow: true,
 };
 
@@ -112,6 +126,12 @@ pub const LIGHT: Theme = Theme {
     crit_hi: rgb(0xe8642a),
     ok: rgb(0x087a4d),
     err: rgb(0xc42a45),
+    age_new: rgb(0x1f9d55),
+    age_mid: rgb(0xd9a400),
+    age_old: rgb(0xd6291f),
+    prot_free: rgb(0x23a35e),
+    prot_caution: rgb(0xd99200),
+    prot_blocked: rgb(0x8f7377),
     glow: false,
 };
 
@@ -226,6 +246,36 @@ pub enum FileCat {
 }
 
 impl FileCat {
+    pub const ALL: [FileCat; 10] = [
+        FileCat::Image,
+        FileCat::Office,
+        FileCat::Pdf,
+        FileCat::Data,
+        FileCat::Text,
+        FileCat::Archive,
+        FileCat::Audio,
+        FileCat::Video,
+        FileCat::Program,
+        FileCat::Other,
+    ];
+
+    /// Name der Kategorie (Treemap-Legende).
+    pub fn label_key(self) -> jt_core::Key {
+        use jt_core::Key;
+        match self {
+            FileCat::Image => Key::CatImage,
+            FileCat::Office => Key::CatOffice,
+            FileCat::Pdf => Key::CatPdf,
+            FileCat::Data => Key::CatData,
+            FileCat::Text => Key::CatText,
+            FileCat::Archive => Key::CatArchive,
+            FileCat::Audio => Key::CatAudio,
+            FileCat::Video => Key::CatVideo,
+            FileCat::Program => Key::CatProgram,
+            FileCat::Other => Key::CatOther,
+        }
+    }
+
     /// Einordnung nach Dateiendung (ohne Punkt, Groß-/Kleinschreibung egal).
     pub fn from_ext(ext: &str) -> FileCat {
         let mut buf = [0u8; 8];
@@ -303,6 +353,83 @@ impl FileCat {
                 FileCat::Other => rgb(0x8fb0b4),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Treemap-Farbmodi "Alter" und "Schutzstatus"
+
+/// Stützpunkte der Altersskala (Tage, Anteil): bis ein halbes Jahr grün,
+/// um ein Jahr gelb, ab fünf Jahren rot. Dazwischen linear.
+const AGE_STOPS: [(f32, f32); 6] = [
+    (0.0, 0.0),
+    (30.0, 0.15),
+    (180.0, 0.35),
+    (365.0, 0.5),
+    (730.0, 0.7),
+    (1825.0, 1.0),
+];
+
+/// Alter in Tagen -> 0 (heute) .. 1 (5+ Jahre); `None` = unbekannt.
+pub fn age_frac(days: Option<i64>) -> Option<f32> {
+    let d = (days? as f32).max(0.0);
+    for w in AGE_STOPS.windows(2) {
+        let ((d0, f0), (d1, f1)) = (w[0], w[1]);
+        if d <= d1 {
+            return Some(f0 + (f1 - f0) * (d - d0) / (d1 - d0));
+        }
+    }
+    Some(1.0)
+}
+
+/// Volle Farbe auf der Skala grün (neu) über gelb nach rot (alt).
+pub fn age_color(t: &Theme, frac: f32) -> Color32 {
+    let f = frac.clamp(0.0, 1.0);
+    if f < 0.5 {
+        lerp_color(t.age_new, t.age_mid, f * 2.0)
+    } else {
+        lerp_color(t.age_mid, t.age_old, (f - 0.5) * 2.0)
+    }
+}
+
+/// Kachelfüllung im Altersmodus (unbekannt: neutral grau).
+pub fn age_tile(t: &Theme, frac: Option<f32>) -> Color32 {
+    match frac {
+        Some(f) => tile_of(t, age_color(t, f)),
+        None => FileCat::Other.tile(t),
+    }
+}
+
+/// Volle Farbe einer Schutzstufe.
+pub fn prot_color(t: &Theme, p: jt_core::protect::Protection) -> Color32 {
+    use jt_core::protect::Protection;
+    match p {
+        Protection::Free => t.prot_free,
+        Protection::Caution(_) => t.prot_caution,
+        Protection::Blocked(_) => t.prot_blocked,
+    }
+}
+
+/// Kachelfüllung im Schutzmodus.
+pub fn prot_tile(t: &Theme, p: jt_core::protect::Protection) -> Color32 {
+    tile_of(t, prot_color(t, p))
+}
+
+/// Dunkel: wie die Dateityp-Kacheln 62 % Farbe auf Panel; hell: volle Farbe.
+fn tile_of(t: &Theme, c: Color32) -> Color32 {
+    if t.dark {
+        lerp_color(t.panel, c, 0.62)
+    } else {
+        c
+    }
+}
+
+/// Abdunklung und Linienfarbe der Schraffur gesperrter Kacheln.
+pub fn hatch_colors(t: &Theme) -> (Color32, Color32) {
+    if t.dark {
+        (Color32::from_black_alpha(120), with_alpha(t.text2, 110))
+    } else {
+        (with_alpha(t.text, 60), with_alpha(t.text, 120))
     }
 }
 
@@ -620,6 +747,50 @@ mod tests {
             ] {
                 let bg = c.tile(t);
                 assert!(contrast(readable_on(bg), bg) >= 3.0, "{c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn age_scale_is_monotonic_and_readable() {
+        assert_eq!(age_frac(None), None);
+        assert_eq!(age_frac(Some(0)), Some(0.0));
+        assert_eq!(age_frac(Some(100_000)), Some(1.0));
+        assert_eq!(age_frac(Some(365)), Some(0.5));
+        assert_eq!(age_frac(Some(-5)), Some(0.0));
+        let mut last = -1.0;
+        for d in [0, 1, 7, 30, 90, 365, 730, 1500, 1825] {
+            let f = age_frac(Some(d)).unwrap();
+            assert!(f > last, "{d}");
+            last = f;
+        }
+        for t in [&DARK, &LIGHT] {
+            assert_eq!(age_color(t, 0.0), t.age_new);
+            assert_eq!(age_color(t, 0.5), t.age_mid);
+            assert_eq!(age_color(t, 1.0), t.age_old);
+            for i in 0..=10 {
+                let bg = age_tile(t, Some(i as f32 / 10.0));
+                assert!(contrast(readable_on(bg), bg) >= 3.0);
+            }
+            assert_eq!(age_tile(t, None), FileCat::Other.tile(t));
+        }
+    }
+
+    #[test]
+    fn protection_colors_differ_and_are_readable() {
+        use jt_core::protect::{Protection, Reason};
+        for t in [&DARK, &LIGHT] {
+            let ps = [
+                Protection::Free,
+                Protection::Caution(Reason::AppData),
+                Protection::Blocked(Reason::WindowsDir),
+            ];
+            for (i, a) in ps.iter().enumerate() {
+                let bg = prot_tile(t, *a);
+                assert!(contrast(readable_on(bg), bg) >= 3.0, "{a:?}");
+                for b in &ps[i + 1..] {
+                    assert_ne!(prot_color(t, *a), prot_color(t, *b));
+                }
             }
         }
     }

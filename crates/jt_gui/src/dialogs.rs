@@ -4,6 +4,7 @@
 use eframe::egui::{self, Context, Id, Modal};
 use jt_core::export::ExportFormat;
 use jt_core::format::bytes;
+use jt_core::protect::Reason;
 use jt_core::{Key, Lang, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, fill};
@@ -35,27 +36,84 @@ pub struct DeleteDialog {
     /// 1 = erste Rückfrage, 2 = Tippwort (nur endgültig).
     pub step: u8,
     pub typed: String,
+    /// Vorsicht-Elemente (Pfad, Grund): rote Warnung, Häkchen nötig.
+    pub caution: Vec<(String, Reason)>,
+    /// Häkchen "Ich weiß, was ich tue".
+    pub ack: bool,
+    /// Stapel aus dem Auswahlkorb (nur Papierkorb).
+    pub batch: bool,
 }
 
 impl DeleteDialog {
-    pub fn new(tree: &Tree, id: NodeId, permanent: bool, tree_gen: u64) -> Self {
+    pub fn new(
+        tree: &Tree,
+        id: NodeId,
+        permanent: bool,
+        tree_gen: u64,
+        caution: Option<Reason>,
+    ) -> Self {
         let n = tree.node(id);
-        let count = if n.is_dir() {
-            1 + u64::from(n.file_count) + u64::from(n.dir_count)
-        } else {
-            1
-        };
+        let path = tree.full_path(id);
         DeleteDialog {
             ids: vec![id],
-            paths: vec![tree.full_path(id)],
+            caution: caution.map(|r| (path.clone(), r)).into_iter().collect(),
+            paths: vec![path],
             tree_gen,
-            count,
+            count: entry_count(tree, id),
             size: n.size,
             permanent,
             step: 1,
             typed: String::new(),
+            ack: false,
+            batch: false,
         }
     }
+
+    /// Stapel aus dem Auswahlkorb: immer nur Papierkorb. Größe = belegter Speicher.
+    pub fn batch(
+        tree: &Tree,
+        ids: Vec<NodeId>,
+        tree_gen: u64,
+        caution: Vec<(String, Reason)>,
+    ) -> Self {
+        DeleteDialog {
+            paths: ids.iter().map(|&id| tree.full_path(id)).collect(),
+            count: ids.iter().map(|&id| entry_count(tree, id)).sum(),
+            size: ids.iter().map(|&id| tree.node(id).allocated).sum(),
+            ids,
+            tree_gen,
+            permanent: false,
+            step: 1,
+            typed: String::new(),
+            caution,
+            ack: false,
+            batch: true,
+        }
+    }
+
+    /// Darf der Bestätigen-/Weiter-Knopf aktiv sein? Bei Vorsicht-Elementen nur mit Häkchen.
+    pub fn ack_ok(&self) -> bool {
+        self.caution.is_empty() || self.ack
+    }
+}
+
+/// Anzahl Einträge inklusive aller Unterordner und Dateien.
+fn entry_count(tree: &Tree, id: NodeId) -> u64 {
+    let n = tree.node(id);
+    if n.is_dir() {
+        1 + u64::from(n.file_count) + u64::from(n.dir_count)
+    } else {
+        1
+    }
+}
+
+/// Höchstzahl angezeigter Pfade im Stapel-Dialog.
+pub const MAX_LISTED_PATHS: usize = 10;
+
+/// Die ersten Pfade und die Zahl der übrigen.
+pub fn listed_paths(paths: &[String]) -> (&[String], usize) {
+    let n = paths.len().min(MAX_LISTED_PATHS);
+    (&paths[..n], paths.len() - n)
 }
 
 /// Darf eine Lösch-Bestätigung ausgeführt werden? Nur wenn der Baum seit dem Öffnen
@@ -155,20 +213,54 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
         state.status = tr(lang, Key::DelTreeChanged).to_string();
         return;
     }
-    let path = dlg.paths.join("\n");
+    let (shown, more) = listed_paths(&dlg.paths);
+    let mut path = shown.join("\n");
+    if more > 0 {
+        path.push('\n');
+        path.push_str(&fill(
+            tr(lang, Key::DelMorePaths),
+            &[("{n}", &more.to_string())],
+        ));
+    }
     let count = dlg.count;
     let size = dlg.size;
     let mut close = false;
     let mut confirm = false;
     let resp = Modal::new(Id::unique("jt_delete_modal")).show(ctx, |ui| {
-        ui.set_max_width(520.0);
+        ui.set_max_width(560.0);
         let count_s = jt_core::format::number(count, lang);
-        if !dlg.permanent {
+        if dlg.batch {
+            ui.heading(tr(lang, Key::DelBatchTitle));
+            ui.label(fill(
+                tr(lang, Key::DelBatchText),
+                &[
+                    ("{n}", &jt_core::format::number(dlg.ids.len() as u64, lang)),
+                    ("{size}", &bytes(size, lang)),
+                ],
+            ));
+            ui.label(fill(
+                tr(lang, Key::DelStep1Count),
+                &[("{n}", &count_s), ("{size}", &bytes(size, lang))],
+            ));
+            path_box(ui, &path);
+            caution_block(ui, lang, dlg);
+            ui.horizontal(|ui| {
+                if widgets::danger_button(ui, tr(lang, Key::BasketRecycleAll), dlg.ack_ok())
+                    .clicked()
+                {
+                    confirm = true;
+                }
+                if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
+                    close = true;
+                }
+            });
+        } else if !dlg.permanent {
             ui.heading(tr(lang, Key::DelRecycleTitle));
             ui.label(fill(tr(lang, Key::DelRecycleText), &[("{n}", &count_s)]));
-            ui.monospace(&path);
+            path_box(ui, &path);
+            caution_block(ui, lang, dlg);
             ui.horizontal(|ui| {
-                if widgets::danger_button(ui, tr(lang, Key::CtxRecycle), true).clicked() {
+                if widgets::danger_button(ui, tr(lang, Key::CtxRecycle), dlg.ack_ok()).clicked() {
                     confirm = true;
                 }
                 if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
@@ -178,13 +270,14 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
         } else if dlg.step == 1 {
             ui.heading(tr(lang, Key::DelTitle));
             ui.label(tr(lang, Key::DelStep1Text));
-            ui.monospace(&path);
+            path_box(ui, &path);
             ui.label(fill(
                 tr(lang, Key::DelStep1Count),
                 &[("{n}", &count_s), ("{size}", &bytes(size, lang))],
             ));
+            caution_block(ui, lang, dlg);
             ui.horizontal(|ui| {
-                if widgets::danger_button(ui, tr(lang, Key::DelContinue), true).clicked() {
+                if widgets::danger_button(ui, tr(lang, Key::DelContinue), dlg.ack_ok()).clicked() {
                     dlg.step = 2;
                 }
                 if widgets::tool_button(ui, tr(lang, Key::Cancel), true).clicked() {
@@ -193,12 +286,12 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
             });
         } else {
             ui.heading(tr(lang, Key::DelStep2Title));
-            ui.monospace(&path);
+            path_box(ui, &path);
             ui.label(tr(lang, Key::DelStep2Text));
             let edit = ui.text_edit_singleline(&mut dlg.typed);
             edit.request_focus();
-            let ok = confirm_word_ok(lang, &dlg.typed);
-            if !dlg.typed.is_empty() && !ok {
+            let ok = confirm_word_ok(lang, &dlg.typed) && dlg.ack_ok();
+            if !dlg.typed.is_empty() && !confirm_word_ok(lang, &dlg.typed) {
                 ui.colored_label(ui.visuals().warn_fg_color, tr(lang, Key::DelWrongWord));
             }
             ui.horizontal(|ui| {
@@ -220,7 +313,7 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
     if resp.should_close() {
         close = true;
     }
-    if confirm {
+    if confirm && dlg.ack_ok() {
         state.actions.push(Action::ConfirmDelete {
             ids: dlg.ids.clone(),
             paths: dlg.paths.clone(),
@@ -232,6 +325,56 @@ fn delete_dialog(ctx: &Context, state: &mut AppState) {
     if close {
         state.dialogs.delete = None;
     }
+}
+
+/// Pfadliste in fester Schrift, bei vielen Pfaden scrollbar.
+fn path_box(ui: &mut egui::Ui, path: &str) {
+    egui::ScrollArea::vertical()
+        .id_salt("jt_delete_paths")
+        .max_height(180.0)
+        .show(ui, |ui| {
+            ui.monospace(path);
+        });
+}
+
+/// Rote Warnung mit Begründungen und Häkchen "Ich weiß, was ich tue".
+fn caution_block(ui: &mut egui::Ui, lang: Lang, dlg: &mut DeleteDialog) {
+    if dlg.caution.is_empty() {
+        return;
+    }
+    let t = Theme::of(ui);
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.5, t.red))
+        .fill(crate::theme::with_alpha(
+            t.red,
+            if t.dark { 28 } else { 18 },
+        ))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                crate::icons::paint_warning(ui.painter(), r.shrink(1.0), t.red);
+                ui.colored_label(
+                    t.red,
+                    egui::RichText::new(tr(lang, Key::DelCautionTitle)).strong(),
+                );
+            });
+            const SHOWN: usize = 5;
+            for (p, r) in dlg.caution.iter().take(SHOWN) {
+                ui.colored_label(t.red, format!("{p} – {}", r.text(lang)));
+            }
+            if dlg.caution.len() > SHOWN {
+                ui.colored_label(
+                    t.red,
+                    fill(
+                        tr(lang, Key::DelCautionMore),
+                        &[("{n}", &(dlg.caution.len() - SHOWN).to_string())],
+                    ),
+                );
+            }
+            ui.checkbox(&mut dlg.ack, tr(lang, Key::DelCautionAck));
+        });
+    ui.add_space(4.0);
 }
 
 fn export_dialog(ctx: &Context, state: &mut AppState) {
@@ -381,6 +524,36 @@ mod tests {
         assert!(!confirm_word_ok(Lang::De, "DELETE"));
         assert!(confirm_word_ok(Lang::En, "DELETE"));
         assert!(!confirm_word_ok(Lang::En, ""));
+    }
+
+    #[test]
+    fn caution_needs_ack_and_batch_lists_paths() {
+        let t = crate::safety::tests::win_tree();
+        let cfg = t
+            .find_path("C:\\Users\\demo\\AppData\\Roaming\\cfg.json")
+            .unwrap();
+        let iso = t.find_path("C:\\Users\\demo\\Downloads\\old.iso").unwrap();
+        let mut d = DeleteDialog::new(&t, cfg, false, 3, Some(Reason::AppData));
+        assert!(!d.ack_ok());
+        d.ack = true;
+        assert!(d.ack_ok());
+        let d = DeleteDialog::new(&t, iso, true, 3, None);
+        assert!(d.ack_ok());
+        assert_eq!(d.step, 1);
+        let b = DeleteDialog::batch(
+            &t,
+            vec![iso, cfg],
+            3,
+            vec![(t.full_path(cfg), Reason::AppData)],
+        );
+        assert!(b.batch && !b.permanent && !b.ack_ok());
+        assert_eq!(b.paths.len(), 2);
+        assert_eq!(b.size, t.node(iso).allocated + t.node(cfg).allocated);
+        let many: Vec<String> = (0..25).map(|i| i.to_string()).collect();
+        let (shown, more) = listed_paths(&many);
+        assert_eq!((shown.len(), more), (10, 15));
+        let (shown, more) = listed_paths(&many[..3]);
+        assert_eq!((shown.len(), more), (3, 0));
     }
 
     #[test]

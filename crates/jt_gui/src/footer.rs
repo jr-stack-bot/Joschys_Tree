@@ -5,7 +5,7 @@ use eframe::egui::{self, Rect, Sense, Stroke, pos2, vec2};
 use jt_core::format::{bytes, number};
 use jt_core::{Key, ScanMode, tr};
 
-use crate::app::{AppState, can_delete, fill};
+use crate::app::{Action, AppState, can_delete, fill};
 use crate::icons;
 use crate::theme::{Theme, with_alpha};
 use crate::widgets::{self, mono};
@@ -29,7 +29,8 @@ fn tag(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::Response {
 }
 
 /// Fußzeile: Status als Klammer-Tag, Scan-Modus, Admin/Nur-Lesen, rechts "@ Joschy".
-pub fn show(ui: &mut egui::Ui, state: &AppState) {
+pub fn show(ui: &mut egui::Ui, state_mut: &mut AppState) {
+    let state: &AppState = state_mut;
     let lang = state.lang();
     let t = Theme::of(ui);
     let full = ui.max_rect();
@@ -61,6 +62,16 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
         Some(ScanMode::Walk) => (tr(lang, Key::ModeWalk), tr(lang, Key::ModeWalkLong)),
         None => ("–", tr(lang, Key::FooterMode)),
     };
+    let basket = state.tree.as_ref().map(|tr_| {
+        fill(
+            tr(lang, Key::BasketFooter),
+            &[
+                ("{n}", &number(state.basket.len() as u64, lang)),
+                ("{size}", &bytes(state.basket.total_allocated(tr_), lang)),
+            ],
+        )
+    });
+    let mut toggle_basket = false;
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -86,6 +97,25 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
                 t.text2,
             )
             .on_hover_text(mode_tip);
+            if let Some(b) = &basket {
+                sep(ui, t);
+                let r = tag(
+                    ui,
+                    b,
+                    if state.basket.is_empty() {
+                        t.text2
+                    } else {
+                        t.accent_text
+                    },
+                )
+                .interact(Sense::click())
+                .on_hover_text(tr(lang, Key::BasketShortcut));
+                if r.clicked() {
+                    toggle_basket = true;
+                }
+                let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                icons::paint_basket(ui.painter(), ir.shrink(1.0), t.accent);
+            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 // Status links als Klammer-Tag.
@@ -143,4 +173,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
             });
         });
     });
+    if toggle_basket {
+        state_mut.actions.push(Action::ToggleBasketPanel);
+    }
 }

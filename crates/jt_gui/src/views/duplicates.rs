@@ -67,7 +67,6 @@ impl DupState {
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     let lang = state.lang();
-    let allow_delete = state.deletion_allowed();
     let Some(tree) = state.tree.clone() else {
         no_tree(ui, lang);
         return;
@@ -143,7 +142,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     let rows = &ds.rows;
     let groups = &ds.groups;
     let selected = state.selected;
-    let actions = &mut state.actions;
+    let mut cx = crate::menu_cx!(state, &tree);
     let mut fx = TableFx::begin(ui, "jt_dup_table");
     TableBuilder::new(ui)
         .id_salt("jt_dup_table")
@@ -193,13 +192,15 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     row.col(|ui| fx.mark(ui, u64::from(id), is_sel));
                     row.col(|_| {});
                     row.col(|ui| {
+                        let prot = cx.prot.protection(&tree, id);
+                        crate::views::prot_badge(ui, prot, cx.basket.contains(id), lang);
                         cell(
                             ui,
                             tree.full_path(id),
                             if is_sel { t.sel_text } else { t.text },
                         );
                     });
-                    row_interaction(&row.response(), lang, &tree, id, actions, allow_delete);
+                    row_interaction(&row.response(), &mut cx, id);
                 }
             });
         });

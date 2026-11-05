@@ -542,6 +542,39 @@ impl TableFx {
     }
 }
 
+/// Anzeigedauer eines Toasts.
+pub const TOAST_TIME: Duration = Duration::from_millis(3500);
+
+/// Kurzer Hinweis unten in der Mitte; verschwindet nach [`TOAST_TIME`].
+pub fn toast(ctx: &egui::Context, toast: &mut Option<(String, std::time::Instant)>) {
+    let Some((text, at)) = toast.as_ref() else {
+        return;
+    };
+    let age = at.elapsed();
+    if age >= TOAST_TIME {
+        *toast = None;
+        return;
+    }
+    egui::Area::new(Id::unique("jt_toast"))
+        .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -48.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let t = Theme::of(ui);
+            egui::Frame::new()
+                .fill(t.core_hi)
+                .stroke(Stroke::new(1.0, t.accent))
+                .inner_margin(egui::Margin::symmetric(14, 8))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).color(t.text_hi))
+                            .selectable(false),
+                    );
+                });
+        });
+    ctx.request_repaint_after(TOAST_TIME - age);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

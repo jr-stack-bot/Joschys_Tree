@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use eframe::egui::{self, Ui};
+use jt_core::protect::Protection;
 use jt_core::{FileTime, Key, Lang, NO_NODE, Node, NodeId, Tree, tr};
 
 use crate::app::{Action, AppState, Tab};
+use crate::basket::Basket;
+use crate::icons;
+use crate::safety::{Decision, ProtCache};
 use crate::theme::Theme;
 use crate::widgets;
 
+pub mod basket;
+pub mod cleanup;
 pub mod delta;
 pub mod details;
 pub mod duplicates;
@@ -17,9 +23,10 @@ pub mod top_files;
 pub mod tree_view;
 pub mod treemap;
 
-const TABS: [(Tab, Key); 7] = [
+const TABS: [(Tab, Key); 8] = [
     (Tab::Tree, Key::TabTree),
     (Tab::Treemap, Key::TabTreemap),
+    (Tab::Cleanup, Key::TabCleanup),
     (Tab::TopFiles, Key::TabTopFiles),
     (Tab::FileTypes, Key::TabFileTypes),
     (Tab::Search, Key::TabSearch),
@@ -43,6 +50,24 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             if widgets::tool_button(ui, tr(lang, Key::MenuExport), enabled).clicked() {
                 state.actions.push(Action::OpenExport);
             }
+            let label = fill_n(tr(lang, Key::BasketToggle), state.basket.len() as i64);
+            let r =
+                widgets::tool_button(ui, &label, true).on_hover_text(tr(lang, Key::BasketShortcut));
+            let t = Theme::of(ui);
+            let ir = egui::Rect::from_center_size(
+                r.rect.left_center() - egui::vec2(9.0, 0.0),
+                egui::vec2(13.0, 13.0),
+            );
+            let c = if state.settings.basket_open {
+                t.accent
+            } else {
+                t.dim
+            };
+            icons::paint_basket(ui.painter(), ir, c);
+            ui.add_space(14.0);
+            if r.clicked() {
+                state.actions.push(Action::ToggleBasketPanel);
+            }
         });
     });
     let t = Theme::of(ui);
@@ -56,6 +81,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     match state.tab {
         Tab::Tree => tree_view::show(ui, state),
         Tab::Treemap => treemap::show(ui, state),
+        Tab::Cleanup => cleanup::show(ui, state),
         Tab::TopFiles => top_files::show(ui, state),
         Tab::FileTypes => file_types::show(ui, state),
         Tab::Search => search::show(ui, state),
@@ -136,64 +162,162 @@ pub fn cell(ui: &mut Ui, text: impl Into<String>, color: egui::Color32) -> egui:
     ui.add(egui::Label::new(egui::RichText::new(text).color(color)).selectable(false))
 }
 
-/// Rechtsklick-Menü für einen Knoten. Löschpunkte nur, wenn `allow_delete`
-/// (= `AppState::deletion_allowed()`: Admin und Live-Scan, kein Snapshot).
-pub fn node_menu(
-    ui: &mut Ui,
-    lang: Lang,
-    tree: &Tree,
-    id: NodeId,
-    actions: &mut Vec<Action>,
-    with_reveal: bool,
-    allow_delete: bool,
-) {
+/// Gemeinsamer Kontext für Kontextmenü und Zeilenaktionen aller Ansichten.
+pub struct MenuCx<'a> {
+    pub lang: Lang,
+    pub tree: &'a Tree,
+    pub actions: &'a mut Vec<Action>,
+    pub prot: &'a mut ProtCache,
+    pub basket: &'a Basket,
+    /// `app::can_delete()`
+    pub admin: bool,
+    /// `AppState::tree_is_live`
+    pub live: bool,
+}
+
+/// Baut einen [`MenuCx`] aus dem `AppState` (getrennte Feld-Borrows).
+#[macro_export]
+macro_rules! menu_cx {
+    ($state:expr, $tree:expr) => {
+        $crate::views::MenuCx {
+            lang: $state.settings.lang,
+            tree: $tree,
+            actions: &mut $state.actions,
+            prot: &mut $state.prot,
+            basket: &$state.basket,
+            admin: $crate::app::can_delete(),
+            live: $state.tree_is_live,
+        }
+    };
+}
+
+/// Aus welcher Ansicht das Menü kommt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuFrom {
+    Tree,
+    Treemap,
+    List,
+}
+
+/// Rechtsklick-Menü für einen Knoten – EIN gemeinsamer Code für Baum, Treemap,
+/// Top 100, Suche, Duplikate und Korb. Löschpunkte erscheinen nur als Admin im
+/// Live-Scan (nie bei Snapshots) und sind nur aktiv, wenn
+/// [`crate::safety::delete_decision`] zustimmt; sonst ausgegraut mit Begründung.
+pub fn node_menu(ui: &mut Ui, cx: &mut MenuCx<'_>, id: NodeId, from: MenuFrom) {
+    let lang = cx.lang;
+    let tree = cx.tree;
+    if (id as usize) >= tree.nodes.len() {
+        return;
+    }
+    if tree.node(id).is_dir() && ui.button(tr(lang, Key::CtxShowInTreemap)).clicked() {
+        cx.actions.push(Action::ShowInTreemap(id));
+        ui.close();
+    }
     if ui.button(tr(lang, Key::CtxOpenExplorer)).clicked() {
-        actions.push(Action::OpenExplorer(id));
+        cx.actions.push(Action::OpenExplorer(id));
         ui.close();
     }
     if ui.button(tr(lang, Key::CtxCopyPath)).clicked() {
-        actions.push(Action::CopyPath(id));
+        cx.actions.push(Action::CopyPath(id));
         ui.close();
     }
-    if with_reveal && ui.button(tr(lang, Key::CtxShowInTree)).clicked() {
-        actions.push(Action::Reveal(id));
+    if from != MenuFrom::Tree && ui.button(tr(lang, Key::CtxShowInTree)).clicked() {
+        cx.actions.push(Action::Reveal(id));
         ui.close();
     }
-    if allow_delete && id != tree.root() {
-        ui.separator();
-        if ui.button(tr(lang, Key::CtxRecycle)).clicked() {
-            actions.push(Action::AskDelete {
-                id,
-                permanent: false,
-            });
+    ui.separator();
+    if cx.basket.contains(id) {
+        if ui.button(tr(lang, Key::CtxRemoveBasket)).clicked() {
+            cx.actions.push(Action::RemoveBasket(id));
             ui.close();
         }
-        if ui.button(tr(lang, Key::CtxDeletePermanently)).clicked() {
-            actions.push(Action::AskDelete {
-                id,
-                permanent: true,
-            });
+    } else if cx.basket.covered_by_ancestor(tree, id) {
+        ui.add_enabled(false, egui::Button::new(tr(lang, Key::CtxAddBasket)))
+            .on_disabled_hover_text(tr(lang, Key::BasketCovered));
+    } else {
+        let d = cx.prot.basket_decision(tree, id);
+        let r = ui.add_enabled(
+            d.is_allowed(),
+            egui::Button::new(tr(lang, Key::CtxAddBasket)),
+        );
+        let r = hint_for(r, d, lang);
+        if r.clicked() {
+            cx.actions.push(Action::AddBasket(vec![id]));
             ui.close();
+        }
+    }
+    if cx.admin && cx.live && id != tree.root() {
+        ui.separator();
+        let d = cx.prot.decision(tree, id, cx.admin, cx.live);
+        for (key, permanent) in [(Key::CtxRecycle, false), (Key::CtxDeletePermanently, true)] {
+            let r = ui.add_enabled(d.is_allowed(), egui::Button::new(tr(lang, key)));
+            if hint_for(r, d, lang).clicked() {
+                cx.actions.push(Action::AskDelete { id, permanent });
+                ui.close();
+            }
         }
     }
 }
 
-/// Gemeinsame Zeilenauswertung: Klick wählt aus, Doppelklick zeigt im Baum, Rechtsklick-Menü.
-pub fn row_interaction(
-    resp: &egui::Response,
-    lang: Lang,
-    tree: &Tree,
-    id: NodeId,
-    actions: &mut Vec<Action>,
-    allow_delete: bool,
-) {
+/// Hover-Hinweis zu einer Entscheidung (gesperrt: Begründung, Vorsicht: Warnung).
+fn hint_for(r: egui::Response, d: Decision, lang: Lang) -> egui::Response {
+    match d {
+        Decision::Denied(x) => r.on_disabled_hover_text(x.text(lang)),
+        Decision::NeedsAck(reason) => r.on_hover_text(format!(
+            "{}: {}",
+            tr(lang, Key::ProtLevelCaution),
+            reason.text(lang)
+        )),
+        Decision::Allowed => r,
+    }
+}
+
+/// Gemeinsame Zeilenauswertung: Klick wählt aus, Strg+Klick legt in den Korb bzw.
+/// nimmt heraus, Doppelklick zeigt im Baum, Rechtsklick öffnet das Menü.
+pub fn row_interaction(resp: &egui::Response, cx: &mut MenuCx<'_>, id: NodeId) {
     if resp.clicked() {
-        actions.push(Action::Select(id));
+        if resp.ctx.input(|i| i.modifiers.command) {
+            cx.actions.push(Action::ToggleBasket(id));
+        } else {
+            cx.actions.push(Action::Select(id));
+        }
     }
     if resp.double_clicked() {
-        actions.push(Action::Reveal(id));
+        cx.actions.push(Action::Reveal(id));
     }
-    resp.context_menu(|ui| node_menu(ui, lang, tree, id, actions, true, allow_delete));
+    resp.context_menu(|ui| node_menu(ui, cx, id, MenuFrom::List));
+}
+
+/// Kleines Schutz-Symbol (Schloss bzw. Warndreieck) mit Begründung als Tooltip;
+/// liegt das Element im Korb, ein Korb-Symbol. Belegt immer gleich viel Platz.
+pub fn prot_badge(ui: &mut Ui, prot: Protection, in_basket: bool, lang: Lang) {
+    let t = Theme::of(ui);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(13.0, 16.0), egui::Sense::hover());
+    let ir = egui::Rect::from_center_size(r.center(), egui::vec2(11.0, 11.0));
+    match prot {
+        Protection::Blocked(reason) => {
+            icons::paint_padlock(ui.painter(), ir, lock_color(t));
+            resp.on_hover_text(prot_text(prot, reason, lang));
+        }
+        Protection::Caution(reason) => {
+            icons::paint_warning(ui.painter(), ir, t.warn);
+            resp.on_hover_text(prot_text(prot, reason, lang));
+        }
+        Protection::Free if in_basket => {
+            icons::paint_basket(ui.painter(), ir, t.accent);
+        }
+        Protection::Free => {}
+    }
+}
+
+/// Farbe des Schloss-Symbols (rot-grau).
+pub fn lock_color(t: &Theme) -> egui::Color32 {
+    crate::theme::lerp_color(t.text2, t.red, 0.45)
+}
+
+/// "Geschützt: <Begründung>"
+pub fn prot_text(prot: Protection, reason: jt_core::protect::Reason, lang: Lang) -> String {
+    format!("{}: {}", tr(lang, prot.level_key()), reason.text(lang))
 }
 
 #[cfg(test)]

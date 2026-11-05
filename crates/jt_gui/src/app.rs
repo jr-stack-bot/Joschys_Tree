@@ -18,7 +18,9 @@ use jt_core::platform::{SecurityInfo, StreamInfo};
 use jt_core::scan::{ScanError, ScanProgress, ScanRequest};
 use jt_core::{FileTime, Key, Lang, NO_NODE, NodeId, Tree, tr};
 
+use crate::basket::Basket;
 use crate::dialogs::{self, ContentKind, ExportDialog};
+use crate::safety::{Decision, Deny, ProtCache};
 use crate::settings::Settings;
 use crate::theme::Theme;
 use crate::views;
@@ -35,6 +37,7 @@ pub enum Tab {
     #[default]
     Tree,
     Treemap,
+    Cleanup,
     TopFiles,
     FileTypes,
     Search,
@@ -43,7 +46,13 @@ pub enum Tab {
 }
 
 /// Lösch-Regel an genau einer Stelle: nur als Admin.
+/// (Nur im Debug-Build kann der Demo-Hook Admin-Rechte simulieren; der Löschweg in
+/// jt_core prüft den Schutz trotzdem, und auf Nicht-Windows löscht er nie.)
 pub fn can_delete() -> bool {
+    #[cfg(debug_assertions)]
+    if crate::debug_hook::demo_admin() {
+        return true;
+    }
     jt_core::platform::is_admin()
 }
 
@@ -80,6 +89,15 @@ pub enum Action {
         tree_gen: u64,
         permanent: bool,
     },
+    /// Strg+Klick: in den Korb legen bzw. herausnehmen.
+    ToggleBasket(NodeId),
+    AddBasket(Vec<NodeId>),
+    RemoveBasket(NodeId),
+    ClearBasket,
+    CopyBasketPaths,
+    AskDeleteBasket,
+    ToggleBasketPanel,
+    StartCleanup,
     OpenExport,
     RunExport(ExportDialog),
     StartScan,
@@ -103,6 +121,7 @@ pub enum JobKind {
     Dup,
     Details,
     Delete,
+    Cleanup,
 }
 
 /// Ergebnis der Verlaufsanalyse.
@@ -140,6 +159,8 @@ pub enum JobMsg {
         permanent: bool,
         error: Option<String>,
     },
+    /// Aufräum-Kandidaten für Baum-Generation `.0`.
+    CleanupDone(u64, Vec<views::cleanup::CleanCard>),
     /// Dateidialog abgebrochen.
     DialogCancelled,
     Failed(JobKind, String),
@@ -193,7 +214,14 @@ pub struct AppState {
     pub dups: views::duplicates::DupState,
     pub delta: views::delta::DeltaState,
     pub details: views::details::DetailsState,
+    pub cleanup: views::cleanup::CleanupState,
     pub dialogs: dialogs::Dialogs,
+    /// Schutzstufen der sichtbaren Knoten (geleert bei neuer `tree_gen`).
+    pub prot: ProtCache,
+    /// Auswahlkorb (gebunden an `tree_gen` und `tree_is_live`).
+    pub basket: Basket,
+    /// Kurzer Hinweis unten in der Mitte.
+    pub toast: Option<(String, Instant)>,
 }
 
 impl AppState {
@@ -228,7 +256,11 @@ impl AppState {
             dups: Default::default(),
             delta: Default::default(),
             details: Default::default(),
+            cleanup: Default::default(),
             dialogs: Default::default(),
+            prot: Default::default(),
+            basket: Default::default(),
+            toast: None,
         }
     }
 
@@ -262,9 +294,19 @@ impl AppState {
         self.search.results.clear();
         self.dups = Default::default();
         self.details = Default::default();
+        // Laufende Aufräum-Suche des alten Baums wird verworfen (Generation passt nicht).
+        self.cleanup = Default::default();
+        self.prot.sync(self.tree_gen);
+        self.basket.reset(self.tree_gen, live);
     }
 
-    fn save_settings(&mut self) {
+    /// Kurzer Hinweis (Toast), zusätzlich in der Statuszeile.
+    pub fn toast(&mut self, text: String) {
+        self.status = text.clone();
+        self.toast = Some((text, Instant::now()));
+    }
+
+    pub(crate) fn save_settings(&mut self) {
         if let Err(e) = self.settings.save() {
             self.status = fill(
                 tr(self.lang(), Key::SetSaveFailed),
@@ -400,6 +442,7 @@ impl JtApp {
                                 ],
                             );
                             st.set_tree(tree, true);
+                            st.actions.push(Action::StartCleanup);
                             #[cfg(debug_assertions)]
                             if let Some(t) = st.tree.clone() {
                                 crate::debug_hook::after_scan(st, &t);
@@ -485,6 +528,14 @@ impl JtApp {
                         None => fill(tr(lang, Key::DelRecycled), &[("{n}", &n)]),
                     };
                 }
+                JobMsg::CleanupDone(gen_, cards) => {
+                    if st.cleanup.running == Some(gen_) {
+                        st.cleanup.running = None;
+                    }
+                    if gen_ == st.tree_gen {
+                        st.cleanup.set_cards(gen_, cards);
+                    }
+                }
                 JobMsg::DialogCancelled => st.io_busy = None,
                 JobMsg::Failed(kind, err) => {
                     match kind {
@@ -493,6 +544,7 @@ impl JtApp {
                         JobKind::Dup => st.dups.running = None,
                         JobKind::Details => st.details.loading = None,
                         JobKind::Delete => st.delete_running = false,
+                        JobKind::Cleanup => st.cleanup.running = None,
                     }
                     st.status = err;
                 }
@@ -526,7 +578,12 @@ impl JtApp {
         if st.treemap.root != 0 && !is_attached(tree, st.treemap.root) {
             st.treemap.root = 0;
         }
+        st.basket.retain(|id| is_attached(tree, id));
         st.tree_gen += 1;
+        st.basket.rebind(st.tree_gen);
+        st.prot.sync(st.tree_gen);
+        // Aufräum-Ergebnis ist veraltet; wird beim nächsten Öffnen neu berechnet.
+        st.cleanup = Default::default();
         st.tree_view.invalidate();
         st.treemap.invalidate();
         st.top = Default::default();
@@ -577,15 +634,87 @@ impl JtApp {
                     && self.state.deletion_allowed()
                     && !self.state.delete_running
                 {
-                    self.state.dialogs.delete = Some(dialogs::DeleteDialog::new(
-                        t,
-                        id,
-                        permanent,
-                        self.state.tree_gen,
-                    ));
+                    let st = &mut self.state;
+                    match st.prot.decision(t, id, can_delete(), st.tree_is_live) {
+                        Decision::Denied(d) => st.toast(d.text(lang).to_string()),
+                        d => {
+                            let caution = match d {
+                                Decision::NeedsAck(r) => Some(r),
+                                _ => None,
+                            };
+                            st.dialogs.delete = Some(dialogs::DeleteDialog::new(
+                                t,
+                                id,
+                                permanent,
+                                st.tree_gen,
+                                caution,
+                            ));
+                        }
+                    }
                 } else if !can_delete() {
                     self.state.status = tr(lang, Key::DelAdminOnly).to_string();
                 }
+            }
+            Action::ToggleBasket(id) => {
+                if self.state.basket.contains(id) {
+                    self.state.basket.remove(id);
+                } else {
+                    self.state.actions.push(Action::AddBasket(vec![id]));
+                }
+            }
+            Action::AddBasket(ids) => {
+                if let Some(t) = &tree {
+                    self.add_to_basket(t, &ids);
+                }
+            }
+            Action::RemoveBasket(id) => {
+                self.state.basket.remove(id);
+            }
+            Action::ClearBasket => {
+                let (g, live) = (self.state.tree_gen, self.state.tree_is_live);
+                self.state.basket.reset(g, live);
+            }
+            Action::CopyBasketPaths => {
+                if let Some(t) = &tree {
+                    let paths: Vec<String> = self
+                        .state
+                        .basket
+                        .items()
+                        .iter()
+                        .map(|&id| t.full_path(id))
+                        .collect();
+                    ctx.copy_text(paths.join("\r\n"));
+                    self.state
+                        .toast(fill_n_key(lang, Key::BasketPathsCopied, paths.len()));
+                }
+            }
+            Action::AskDeleteBasket => {
+                if let Some(t) = &tree {
+                    self.ask_delete_basket(t);
+                }
+            }
+            Action::ToggleBasketPanel => {
+                self.state.settings.basket_open = !self.state.settings.basket_open;
+                self.state.save_settings();
+            }
+            Action::StartCleanup => {
+                let Some(t) = tree else { return };
+                let gen_ = self.state.tree_gen;
+                if self.state.cleanup.running == Some(gen_) {
+                    return;
+                }
+                self.state.cleanup.running = Some(gen_);
+                let now = jt_core::filter::now();
+                self.spawn(ctx, JobKind::Cleanup, move |_| {
+                    let groups = jt_core::cleanup::find_cleanup(
+                        &t,
+                        crate::safety::env(),
+                        now,
+                        &jt_core::cleanup::CleanupOptions::default(),
+                    );
+                    let cards = views::cleanup::build_cards(&t, &groups, now, crate::safety::env());
+                    JobMsg::CleanupDone(gen_, cards)
+                });
             }
             Action::ConfirmDelete {
                 ids,
@@ -783,6 +912,125 @@ impl JtApp {
         }
     }
 
+    /// Elemente in den Korb legen; gesperrte werden abgewiesen (Toast mit Begründung).
+    fn add_to_basket(&mut self, t: &Tree, ids: &[NodeId]) {
+        let lang = self.state.lang();
+        let st = &mut self.state;
+        if st.basket.gen_() != st.tree_gen {
+            st.basket.reset(st.tree_gen, st.tree_is_live);
+        }
+        let mut ok = Vec::with_capacity(ids.len());
+        let mut denied: Option<(NodeId, Deny)> = None;
+        let mut denied_n = 0usize;
+        for &id in ids {
+            if id as usize >= t.nodes.len() {
+                continue;
+            }
+            match st.prot.basket_decision(t, id) {
+                Decision::Denied(d) => {
+                    denied_n += 1;
+                    denied.get_or_insert((id, d));
+                }
+                _ => ok.push(id),
+            }
+        }
+        let added = st.basket.add_many(t, &ok);
+        let msg = match denied {
+            Some((id, d)) if denied_n == 1 => fill(
+                tr(lang, Key::BasketDenied),
+                &[("{name}", &t.node(id).name), ("{reason}", d.text(lang))],
+            ),
+            Some(_) => fill_n_key(lang, Key::BasketDeniedMore, denied_n),
+            None if ids.len() == 1 && added == 1 => fill(
+                tr(lang, Key::BasketAdded),
+                &[("{name}", &t.node(ids[0]).name)],
+            ),
+            None if added == 0 && ids.len() == 1 => tr(lang, Key::BasketCovered).to_string(),
+            None => fill_n_key(lang, Key::BasketAddedMany, added),
+        };
+        st.toast(msg);
+    }
+
+    /// Lösch-Dialog für den ganzen Korb (nur Papierkorb). Jedes Element wird erneut
+    /// geprüft; gesperrte fliegen aus dem Korb.
+    fn ask_delete_basket(&mut self, t: &Tree) {
+        let lang = self.state.lang();
+        let st = &mut self.state;
+        if !st.deletion_allowed() || st.delete_running || st.basket.is_empty() {
+            if !can_delete() {
+                st.toast(tr(lang, Key::BasketNeedAdmin).to_string());
+            } else if !st.tree_is_live {
+                st.toast(tr(lang, Key::BasketNeedLive).to_string());
+            }
+            return;
+        }
+        if st.basket.gen_() != st.tree_gen || !st.basket.live() {
+            st.basket.reset(st.tree_gen, st.tree_is_live);
+            st.status = tr(lang, Key::DelTreeChanged).to_string();
+            return;
+        }
+        let mut ids = Vec::new();
+        let mut caution = Vec::new();
+        let mut denied = Vec::new();
+        for &id in st.basket.items() {
+            match st.prot.decision(t, id, can_delete(), st.tree_is_live) {
+                Decision::Allowed => ids.push(id),
+                Decision::NeedsAck(r) => {
+                    ids.push(id);
+                    caution.push((t.full_path(id), r));
+                }
+                Decision::Denied(_) => denied.push(id),
+            }
+        }
+        if !denied.is_empty() {
+            for id in &denied {
+                st.basket.remove(*id);
+            }
+            st.toast(fill_n_key(lang, Key::BasketDeniedMore, denied.len()));
+        }
+        if ids.is_empty() {
+            return;
+        }
+        st.dialogs.delete = Some(dialogs::DeleteDialog::batch(t, ids, st.tree_gen, caution));
+    }
+
+    /// Tastenkürzel (nur ohne Texteingabe und ohne offenen Dialog).
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let st = &mut self.state;
+        let modal = st.dialogs.delete.is_some() || st.dialogs.export.is_some() || st.dialogs.about;
+        if modal || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (del, esc, back, ctrl_b) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+                i.key_pressed(egui::Key::Escape),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::B),
+            )
+        });
+        if del && let Some(id) = st.selected {
+            st.actions.push(Action::AddBasket(vec![id]));
+        }
+        if esc && !egui::Popup::is_any_open(ctx) {
+            st.selected = None;
+        }
+        if back
+            && st.tab == Tab::Treemap
+            && let Some(t) = &st.tree
+        {
+            let p = t
+                .node(st.treemap.root.min(t.nodes.len() as NodeId - 1))
+                .parent;
+            if p != NO_NODE {
+                st.treemap.root = p;
+            }
+        }
+        if ctrl_b {
+            st.actions.push(Action::ToggleBasketPanel);
+        }
+    }
+
     fn start_scan(&mut self, ctx: &egui::Context) {
         if self.state.scan.is_some() {
             return;
@@ -835,6 +1083,20 @@ impl JtApp {
             .filter(|&(id, _)| id != root)
             .unzip();
         if ids.is_empty() || self.state.delete_running {
+            return;
+        }
+        // Letzte, ungecachte Prüfung jedes Elements (Admin, Live-Scan, Löschschutz).
+        let admin = can_delete();
+        let live = self.state.tree_is_live;
+        let env = crate::safety::env();
+        if let Some(d) = ids.iter().find_map(|&id| {
+            match crate::safety::delete_decision(env, &tree, id, admin, live) {
+                Decision::Denied(d) => Some(d),
+                _ => None,
+            }
+        }) {
+            let lang = self.state.lang();
+            self.state.toast(d.text(lang).to_string());
             return;
         }
         self.state.delete_running = true;
@@ -1145,6 +1407,7 @@ impl eframe::App for JtApp {
         let ctx = ui.ctx().clone();
         self.poll_jobs();
         self.state.now = jt_core::filter::now();
+        self.state.prot.sync(self.state.tree_gen);
 
         let title = self.state.window_title();
         if title != self.last_title {
@@ -1184,7 +1447,26 @@ impl eframe::App for JtApp {
                     .fill(t.bg)
                     .inner_margin(egui::Margin::symmetric(10, 4)),
             )
-            .show(ui, |ui| footer::show(ui, &self.state));
+            .show(ui, |ui| footer::show(ui, &mut self.state));
+        if self.state.settings.basket_open && self.state.tree.is_some() {
+            // Leerer Korb: schmale, feste Leiste; mit Inhalt: veränderbare Höhe.
+            let empty = self.state.basket.is_empty();
+            egui::Panel::bottom(if empty {
+                "jt_basket_empty"
+            } else {
+                "jt_basket"
+            })
+            .resizable(!empty)
+            .default_size(180.0)
+            .size_range(90.0..=(ctx.content_rect().height() * 0.3).max(120.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.panel)
+                    .stroke(line)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ui, |ui| views::basket::show(ui, &mut self.state));
+        }
         egui::Panel::right("jt_details")
             .resizable(true)
             .default_size(310.0)
@@ -1203,6 +1485,8 @@ impl eframe::App for JtApp {
             )
             .show(ui, |ui| views::show(ui, &mut self.state));
         dialogs::show(&ctx, &mut self.state);
+        widgets::toast(&ctx, &mut self.state.toast);
+        self.shortcuts(&ctx);
 
         self.process_actions(&ctx);
 
@@ -1212,6 +1496,7 @@ impl eframe::App for JtApp {
             || st.io_busy.is_some()
             || st.delete_running
             || st.details.loading.is_some()
+            || st.cleanup.running.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
@@ -1300,9 +1585,21 @@ fn load_history(
     })
 }
 
+/// Text mit Platzhalter `{n}` aus einem Key.
+pub fn fill_n_key(lang: Lang, key: Key, n: usize) -> String {
+    fill(tr(lang, key), &[("{n}", &n.to_string())])
+}
+
 /// Fehlertext fürs Löschen. "Kein Papierkorb" (`Unsupported` beim Papierkorb-Weg)
-/// bekommt einen eigenen Hinweis auf "Endgültig löschen".
+/// bekommt einen eigenen Hinweis auf "Endgültig löschen"; ein vom Löschschutz
+/// abgewiesener Auftrag die Begründung in der eingestellten Sprache.
 fn delete_error_text(lang: Lang, permanent: bool, e: &std::io::Error) -> String {
+    if let Some(pe) = e
+        .get_ref()
+        .and_then(|x| x.downcast_ref::<jt_core::protect::ProtectError>())
+    {
+        return pe.message(lang);
+    }
     if !permanent && e.kind() == std::io::ErrorKind::Unsupported {
         tr(lang, Key::DelNoRecycleBin).to_string()
     } else {
@@ -1403,6 +1700,32 @@ mod tests {
         );
         // Beim endgültigen Löschen bleibt der Originaltext.
         assert_eq!(delete_error_text(Lang::De, true, &e), e.to_string());
+    }
+
+    #[test]
+    fn protect_error_is_shown_in_ui_language() {
+        let env = jt_core::protect::ProtectEnv::windows_default();
+        let e =
+            jt_core::platform::guard_paths(&[r"C:\Windows\x.dll".to_string()], &env).unwrap_err();
+        let de = delete_error_text(Lang::De, false, &e);
+        let en = delete_error_text(Lang::En, true, &e);
+        assert!(de.contains("nichts wurde gelöscht"), "{de}");
+        assert!(en.contains("nothing was deleted"), "{en}");
+    }
+
+    #[test]
+    fn set_tree_resets_basket_and_binds_it() {
+        let mut st = AppState::new(Settings::default());
+        let t = sample_tree();
+        let jpg = t.find_path("C:\\Users\\joschy\\Bild.JPG").unwrap();
+        st.set_tree(t, true);
+        let tr_ = st.tree.clone().unwrap();
+        assert_eq!(st.basket.add_many(&tr_, &[jpg]), 1);
+        assert_eq!(st.basket.gen_(), st.tree_gen);
+        assert!(st.basket.live());
+        st.set_tree(sample_tree(), false);
+        assert!(st.basket.is_empty());
+        assert!(!st.basket.live());
     }
 
     #[test]

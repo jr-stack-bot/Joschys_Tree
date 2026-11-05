@@ -26,24 +26,32 @@ Baumansicht, helles Design:
 
 ![Joschys_Tree Baumansicht, hell](docs/screenshot-light.png)
 
-Treemap, Farben nach Dateityp:
+Treemap mit Windows-Schutz (Schloss und Schraffur = geschützt, Warndreieck = Vorsicht) und Auswahlkorb unten:
 
-![Joschys_Tree Treemap](docs/screenshot-treemap.png)
+![Joschys_Tree Treemap mit Schutz und Auswahlkorb](docs/screenshot-treemap.png)
 
-<sub>Aufgenommen unter Linux (Scan von `/usr/lib`), daher Linux-Pfade und Ersatzschriften; unter Windows erscheinen Consolas und Bahnschrift.</sub>
+Aufräum-Assistent:
+
+![Joschys_Tree Aufräum-Assistent](docs/screenshot-aufraeumen.png)
+
+<sub>Aufgenommen unter Linux (Baum- und Hell-Ansicht: Scan von `/usr/lib`; Treemap und Aufräumen: künstlicher Demo-Baum mit Windows-Pfaden), daher Ersatzschriften; unter Windows erscheinen Consolas und Bahnschrift.</sub>
 
 ## Funktionen
 
 **Kern**
 - Schneller Scan von Laufwerken und Netzfreigaben (lokal NTFS: MFT-Schnellscan, sonst paralleler Verzeichnis-Scan)
 - Baumansicht mit Größe, belegtem Speicher, Dateizahl, Prozent und Datum
-- Treemap-Ansicht
+- Treemap-Ansicht: Klick wählt aus, Doppelklick zoomt hinein, Strg+Klick legt in den Korb, Rechtsklick öffnet das Menü; anklickbare Pfadleiste; Farbe nach Dateityp, Alter oder Schutzstatus
 - Top 100 der größten Dateien
 - Dateitypen-Statistik
 - Suche mit Filtern (Name/Glob, Größe, Alter, Endung)
 - Export als CSV, XLSX, HTML und PDF
 
 **Erweitert**
+- Aufräum-Assistent: findet Temp-Dateien, Browser-Cache, Absturzberichte, alte Installationsdateien und Downloads, große alte Dateien und leere Ordner, zeigt die mögliche Ersparnis und legt Kandidaten in den Auswahlkorb
+- Windows-Schutz (geschützte Dateien lassen sich nicht löschen): Schloss-Symbol und Schraffur für gesperrte, Warndreieck für Vorsicht-Elemente, Begründung im Tooltip
+- Auswahlkorb: Elemente aus allen Ansichten sammeln (ohne Doppelzählung), Summe "kann frei werden", alles in einem Schritt in den Papierkorb
+- Tastatur: Entf = in den Korb, Rücktaste = Treemap eine Ebene höher, Strg+B = Korb ein-/ausklappen, Esc = Auswahl aufheben
 - Duplikat-Suche (Größe, Teil-Hash, Voll-Hash)
 - Snapshots speichern (`.jtscan`), Delta-Vergleich und Wachstumsverlauf
 - Detailpanel mit Besitzer, Zugriffsrechten (ACL) und alternativen Datenströmen (ADS)
@@ -57,6 +65,16 @@ Treemap, Farben nach Dateityp:
 - Netzfreigaben, FAT32/exFAT und Fehlerfälle fallen automatisch auf den Verzeichnis-Scan zurück.
 - Gelöscht werden kann nur in einem frischen Scan dieses Rechners, nie in einem geladenen Snapshot (`.jtscan`).
 - "In den Papierkorb" löscht nie endgültig: Laufwerke ohne Papierkorb (Netzfreigaben, USB-Sticks) melden einen Hinweis, dann bleibt nur "Endgültig löschen" mit zweiter Bestätigung.
+
+## Sicher aufräumen
+
+Jedes Element bekommt eine Schutzstufe; gelöscht wird nur über den Papierkorb bzw. mit Bestätigung, und der Löschweg prüft die Stufe noch einmal selbst:
+
+- **Gesperrt:** Windows-Ordner, Programme (`Program Files`), `ProgramData\Microsoft`, Laufwerkswurzeln, `pagefile.sys`/`hiberfil.sys`/`$Recycle.Bin`, Benutzerprofile selbst, `NTUSER.DAT` und alles mit System-Attribut – nie löschbar, auch nicht als Teil eines Ordners.
+- **Vorsicht:** `AppData`-Inhalte (Browser, Programme), Dokumente/Bilder/OneDrive, `Windows.old`, Programmdaten in `ProgramData`, versteckte Dateien, Verknüpfungen – löschbar nach roter Warnung und Häkchen "Ich weiß, was ich tue".
+- **Frei:** alles andere, z. B. Temp-Inhalte, Downloads, eigene Daten- und Backup-Ordner.
+- Info statt Löschen: Ruhezustand, Auslagerungsdatei, `Windows.old` und Papierkorb zeigt der Aufräum-Assistent nur mit Hinweis auf das passende Windows-Werkzeug.
+- Löschen nur als Administrator in einem frischen Scan; geladene Snapshots bleiben schreibgeschützt.
 
 ## Bekannte Einschränkungen
 

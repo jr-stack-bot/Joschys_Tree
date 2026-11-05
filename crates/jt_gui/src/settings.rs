@@ -11,6 +11,15 @@ const FILE_NAME: &str = "joschys_tree_settings.json";
 /// Maximale Anzahl gemerkter Ziele.
 const MAX_RECENT: usize = 10;
 
+/// Farbmodus der Treemap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TreemapColor {
+    #[default]
+    FileType,
+    Age,
+    Protection,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -25,6 +34,10 @@ pub struct Settings {
     pub export_depth: u32,
     /// Zier-Effekte (Leuchten, Scanlines) anzeigen.
     pub effects: bool,
+    /// Farbmodus der Treemap.
+    pub treemap_color: TreemapColor,
+    /// Korb-Panel aufgeklappt.
+    pub basket_open: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +50,8 @@ impl Default for Settings {
             dup_min_size: 1024 * 1024,
             export_depth: 3,
             effects: true,
+            treemap_color: TreemapColor::FileType,
+            basket_open: true,
         }
     }
 }
@@ -133,6 +148,8 @@ mod tests {
             lang: Lang::En,
             dark: false,
             dup_min_size: 42,
+            treemap_color: TreemapColor::Age,
+            basket_open: false,
             ..Default::default()
         };
         s.remember_target("C:\\");
@@ -141,6 +158,7 @@ mod tests {
         s.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded, s);
+        assert_eq!(loaded.treemap_color, TreemapColor::Age);
         assert_eq!(loaded.recent_targets, vec!["c:\\", "\\\\server\\share"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -152,6 +170,12 @@ mod tests {
         let path = dir.join(FILE_NAME);
         std::fs::write(&path, b"{ kaputt").unwrap();
         assert_eq!(Settings::load_from(&path), Settings::default());
+        // Ältere Datei ohne neue Felder: Standardwerte für die neuen Felder.
+        std::fs::write(&path, br#"{"dark": false}"#).unwrap();
+        let old = Settings::load_from(&path);
+        assert!(!old.dark);
+        assert_eq!(old.treemap_color, TreemapColor::FileType);
+        assert!(old.basket_open);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

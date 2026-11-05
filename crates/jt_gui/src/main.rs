@@ -5,11 +5,13 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod basket;
 #[cfg(debug_assertions)]
 mod debug_hook;
 mod dialogs;
 mod footer;
 mod icons;
+mod safety;
 mod settings;
 mod theme;
 mod views;
